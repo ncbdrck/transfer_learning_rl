@@ -4,58 +4,52 @@ from datetime import datetime
 import numpy as np
 from mpi4py import MPI
 from utils.mpi_utils.mpi_utils import sync_networks, sync_grads
-from rl_modules.replay_buffer import replay_buffer
-from rl_modules.vanilla.models import actor, critic
 from utils.mpi_utils.normalizer import normalizer
+from utils.replay_buffer import replay_buffer
 from utils.her_modules.her import her_sampler
+from policy.models import actor, critic
 
 # additional imports
 from torch.utils.tensorboard import SummaryWriter
 import wandb
 import time
 import pickle
+import json
 
 """
-TD3 with HER (MPI-version)
-- v4
-- fixed _eval_agent function
-- added log_interval for logging the training metrics
-- fixed the logging for episodes below the log interval
-- remove until done flag since this implementation cannot handle variable episode lengths
+TD3 with HER (MPI-version) for multi-task learning
 """
 
 
 class td3_agent:
-    def __init__(self, args, env, env_params, seed):
+    def __init__(self, args, envs, env_params_list, env_names, seed):
 
-        # todo: my Variables - Jay
-        self.success_history = []  # for storing the success rate
-        self.success_window = args.log_interval  # Define the window size for averaging
-        self.ep_len_history = []  # for storing the episode length
-        self.ep_len_window = args.log_interval  # for calculating the average episode length
-        self.global_step = 0  # for counting the number of steps taken in the environment
-        self.reward_history = []  # for storing the reward history
-        self.reward_window = args.log_interval  # for calculating the average reward
+        self.log_interval = args.log_interval # for logging the training metrics
 
-        # todo: Variables for logging and saving the model - Jay
+        # Individual environment logging
+        self.success_history_env = [[] for _ in range(len(envs))]
+        self.ep_len_history_env = [[] for _ in range(len(envs))]
+        self.reward_history_env = [[] for _ in range(len(envs))]
+        self.global_step_env = [0 for _ in range(len(envs))]
+        self.global_step = 0  # for outer loop
+
+        # Variables for logging and saving the model
         self.exp_name: str = os.path.basename(__file__)[: -len(".py")]  # Name of the experiment
-        self.run_name = f"{args.env_name}__{self.exp_name}__{args.seed}__{int(time.time())}"
+        self.run_name = f"{args.exp_name}__{self.exp_name}__{args.seed}__{int(time.time())}"
         self.rank = MPI.COMM_WORLD.Get_rank()  # Get the MPI process rank for logging - the main process is rank 0
 
-        # todo: Initialize the Tensorboard Summary Writer and Weights and Biases - Jay
-        if args.track:
-            if self.rank == 0:
-                wandb.login()  # for offline mode, remove this line
-
-                wandb.init(
-                    project=args.wandb_project_name,
-                    entity=args.wandb_entity,
-                    sync_tensorboard=True,
-                    config=vars(args),
-                    name=self.run_name,
-                    monitor_gym=True,
-                    save_code=True,
-                )
+        # Initialize the Tensorboard Summary Writer and Weights and Biases
+        if args.track and self.rank == 0:
+            wandb.login()  # for offline mode, remove this line
+            wandb.init(
+                project=args.wandb_project_name,
+                entity=args.wandb_entity,
+                sync_tensorboard=True,
+                config=vars(args),
+                name=self.run_name,
+                monitor_gym=True,
+                save_code=True,
+            )
 
         if self.rank == 0:
             # Initialize the Tensorboard Summary Writer

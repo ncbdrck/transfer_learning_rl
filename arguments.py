@@ -2,14 +2,14 @@ import argparse
 
 """
 Here are the param for the training
-- MAML TD3
+- Multi-Task leaning with TD3
 """
 
 
 def get_args():
     parser = argparse.ArgumentParser()
     # the environment setting
-    parser.add_argument('--exp-name', type=str, default='maml_td3_test', help='the experiment name')
+    parser.add_argument('--exp-name', type=str, default='vanilla_multi_task', help='the experiment name')
     parser.add_argument('--n-epochs', type=int, default=10, help='the number of epochs to train the agent')
     parser.add_argument('--n-cycles', type=int, default=10, help='the times to collect samples per epoch')
     parser.add_argument('--n-batches', type=int, default=40, help='the times to update the network')
@@ -36,10 +36,10 @@ def get_args():
     parser.add_argument('--cuda', action='store_true', help='if use gpu do the acceleration')
     parser.add_argument('--num-rollouts-per-mpi', type=int, default=2, help='the rollouts per mpi')
 
-    # todo: additional args for logging and saving the model - Jay
+    # Additional args for logging and saving the model
     parser.add_argument('--track', type=bool, default=False,
                         help='if toggled, this experiment will be tracked with Weights and Biases')
-    parser.add_argument('--wandb-project-name', type=str, default='deep_rl_with_her',
+    parser.add_argument('--wandb-project-name', type=str, default='transfer_learning_rl',
                         help='the name of the Weights and Biases project')
     parser.add_argument('--wandb-entity', type=str, default=None,
                         help='the name of the Weights and Biases entity')
