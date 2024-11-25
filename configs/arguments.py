@@ -6,7 +6,7 @@ Here are the param for the training
 """
 
 
-def get_args():
+def get_args_vanilla():
     parser = argparse.ArgumentParser()
     # the environment setting
     parser.add_argument('--exp-name', type=str, default='vanilla_multi_task', help='the experiment name')

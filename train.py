@@ -1,14 +1,13 @@
 import numpy as np
 import gymnasium as gym
 import os
-from arguments import get_args
+from configs.arguments import get_args_vanilla
 from mpi4py import MPI
 from agent.td3 import td3_agent
 import random
 import torch
 
 # for environments from panda-gym
-import panda_gym
 
 """
 Multi-task Learning with TD3
@@ -61,5 +60,5 @@ if __name__ == '__main__':
     os.environ['OMP_NUM_THREADS'] = '1'
     os.environ['MKL_NUM_THREADS'] = '1'
     os.environ['IN_MPI'] = '1'
-    args = get_args()
+    args = get_args_vanilla()
     launch(args)
