@@ -1,9 +1,9 @@
 import numpy as np
 import gymnasium as gym
 import os
-from maml_td3_arguments import get_args
+from arguments import get_args
 from mpi4py import MPI
-from rl_modules.vanilla.maml_td3_agent import maml_td3_her_agent
+from agent.td3 import td3_agent
 import random
 import torch
 
@@ -11,9 +11,7 @@ import torch
 import panda_gym
 
 """
-train the agent, the MPI part code is copied from openai baselines(https://github.com/openai/baselines/blob/master/baselines/her)
-- Updated for MAML TD3
-- Added support for multiple environments
+Multi-task Learning with TD3
 """
 
 def get_env_params(env):
@@ -26,10 +24,11 @@ def get_env_params(env):
     return params
 
 def launch(args):
-    # env_names = ['FetchReach-v2', 'FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2',
+    # env_names = ['FetchReach-v2', 'FetchPush-v2', 'FetchPick
+    # AndPlace-v2', 'FetchSlide-v2',
     #              'PandaReach-v3', 'PandaPush-v3', 'PandaPickAndPlace-v3', 'PandaSlide-v3']  # all environments
-    # env_names = ['FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2']  # fetch environments
-    env_names = ['FetchReach-v2']
+    env_names = ['FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2']  # fetch environments
+    # env_names = ['FetchReach-v2']
     # env_names = ['PandaReach-v3', 'PandaPush-v3', 'PandaPickAndPlace-v3', 'PandaSlide-v3']  # panda environments
     # env_names = ['FetchReach-v2', 'FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2',
     #              'PandaReach-v3', 'PandaPush-v3', 'PandaPickAndPlace-v3']
@@ -54,9 +53,9 @@ def launch(args):
         # torch.backends.cudnn.deterministic = True
         # torch.backends.cudnn.benchmark = False
 
-    # create the maml_td3_agent to interact with the environments
-    maml_td3_trainer = maml_td3_her_agent(args, envs, env_params, env_names, seed)
-    maml_td3_trainer.learn()
+    # create the multi_td3_agent to interact with the environments
+    multi_td3_trainer = td3_agent(args, envs, env_params, env_names, seed)
+    multi_td3_trainer.learn()
 
 if __name__ == '__main__':
     os.environ['OMP_NUM_THREADS'] = '1'
