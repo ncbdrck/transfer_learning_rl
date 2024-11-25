@@ -207,6 +207,24 @@ class td3_agent:
             with open(config_filename, 'w') as f:
                 json.dump(vars(args), f, indent=2)
 
+    def sample_tasks(self):
+        """
+        Sample a list of tasks for the meta-update
+        :return: return a list of tasks
+        """
+        # sample multiple tasks
+        if self.args.multiple_tasks:
+            # sample the specific number of tasks if the number of tasks is less than the number of environments
+            if self.args.multi_num_tasks < len(self.envs):
+                return np.random.randint(0, len(self.envs), size=self.args.multi_num_tasks).tolist()
+            else:
+                # if the number of tasks is greater than the number of environments, sample all the environments
+                return list(range(len(self.envs)))
+        else:
+            # sample a single task
+            return [np.random.randint(0, len(self.envs))]
+
+
     def learn(self):
         """
         train the network
