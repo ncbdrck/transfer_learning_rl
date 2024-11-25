@@ -224,8 +224,33 @@ class td3_agent:
             # sample a single task
             return [np.random.randint(0, len(self.envs))]
 
-
     def learn(self):
+        """
+        Train the agent. This is the main method that contains the training loop
+        """
+        for epoch in range(self.args.n_epochs):
+            for cycle in range(self.args.n_cycles):
+                tasks = self.sample_tasks()
+                self.outer_loop(tasks)
+
+                # Evaluate the agent after every cycle
+                self.evaluation_and_logging_cycle(cycle, epoch)
+
+        # save the main model
+        if self.rank == 0 and self.args.save_model:
+
+            print("\033[92m" + f"Saving the model at {self.model_path_maml}" + "\033[0m")
+            torch.save({
+                'actor_state_dict': self.actor_network.state_dict(),
+                'critic_1_state_dict': self.critic_network1.state_dict(),
+                'critic_2_state_dict': self.critic_network2.state_dict(),
+                'actor_target_state_dict': self.actor_target_network.state_dict(),
+                'critic_1_target_state_dict': self.critic_target_network1.state_dict(),
+                'critic_2_target_state_dict': self.critic_target_network2.state_dict(),
+            }, self.model_path_maml)
+
+
+    def learnsd(self):
         """
         train the network
         """
