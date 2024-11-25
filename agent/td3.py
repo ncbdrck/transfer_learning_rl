@@ -336,6 +336,130 @@ class td3_agent:
         self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
         self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
 
+    def evaluation_and_logging_cycle(self, step, epoch):
+        """
+        Evaluate the agent and log the results
+
+        :param epoch: The current epoch
+        :param step: The current step
+        :return:
+        """
+
+        success_rate, reward, ep_len = self.evaluate_agent()
+        if MPI.COMM_WORLD.Get_rank() == 0:
+            print(f'[{datetime.now()}] Epoch: {epoch+1}, Cycle : {step + 1}, eval success rate: {success_rate:.3f}')
+            self.writer.add_scalar("Cycle/eval_success_rate", success_rate, self.global_step)
+            self.writer.add_scalar("Cycle/eval_reward", reward, self.global_step)
+            self.writer.add_scalar("Cycle/eval_ep_len", ep_len, self.global_step)
+            if self.args.track:
+                wandb.log({"Cycle/eval_success_rate": success_rate}, step=self.global_step)
+                wandb.log({"Cycle/eval_reward": reward}, step=self.global_step)
+                wandb.log({"Cycle/eval_ep_len": ep_len}, step=self.global_step)
+
+    def compute_loss(self, env_idx):
+        """
+        Compute the actor and critic loss
+        :param env_idx: Index of the environment
+        :return: actor_loss, critic_loss1, critic_loss2
+        """
+
+        # Sample a batch of transitions
+        transitions = self.buffers[env_idx].sample(self.args.batch_size)
+
+        # Pre-process the observation and goal
+        o, o_next, g = transitions['obs'], transitions['obs_next'], transitions['g']
+        transitions['obs'], transitions['g'] = self._preproc_og(o, g)
+        transitions['obs_next'], transitions['g_next'] = self._preproc_og(o_next, g)
+
+        # Normalize the inputs
+        obs_norm = self.o_norms_list[env_idx].normalize(transitions['obs'])
+        g_norm = self.g_norms_list[env_idx].normalize(transitions['g'])
+        inputs_norm = np.concatenate([obs_norm, g_norm], axis=1)
+
+        obs_next_norm = self.o_norms_list[env_idx].normalize(transitions['obs_next'])
+        g_next_norm = self.g_norms_list[env_idx].normalize(transitions['g_next'])
+        inputs_next_norm = np.concatenate([obs_next_norm, g_next_norm], axis=1)
+
+        # Convert to tensors
+        inputs_norm_tensor = torch.tensor(inputs_norm, dtype=torch.float32)
+        inputs_next_norm_tensor = torch.tensor(inputs_next_norm, dtype=torch.float32)
+        actions_tensor = torch.tensor(transitions['actions'], dtype=torch.float32)
+        r_tensor = torch.tensor(transitions['r'], dtype=torch.float32)
+
+        if self.args.cuda:
+            inputs_norm_tensor = inputs_norm_tensor.cuda()
+            inputs_next_norm_tensor = inputs_next_norm_tensor.cuda()
+            actions_tensor = actions_tensor.cuda()
+            r_tensor = r_tensor.cuda()
+
+        # Compute the target Q-values
+        with torch.no_grad():
+            noise = (torch.randn_like(actions_tensor) * self.args.policy_noise).clamp(-self.args.noise_clip,
+                                                                                      self.args.noise_clip)
+            actions_next = (self.inner_actor_target_networks[env_idx](inputs_next_norm_tensor) + noise).clamp(
+                -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
+            q_target1 = self.inner_critic_target_networks1[env_idx](inputs_next_norm_tensor, actions_next)
+            q_target2 = self.inner_critic_target_networks2[env_idx](inputs_next_norm_tensor, actions_next)
+            q_target = torch.min(q_target1, q_target2)
+            target_q_value = r_tensor + self.args.gamma * q_target
+            clip_return = 1 / (1 - self.args.gamma)
+            target_q_value = torch.clamp(target_q_value, -clip_return, 0)
+
+        # Compute current Q-values and the critic loss
+        if meta:
+            real_q_value1 = self.critic_network1(inputs_norm_tensor, actions_tensor)
+            real_q_value2 = self.critic_network2(inputs_norm_tensor, actions_tensor)
+            critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
+            critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
+        else:
+            real_q_value1 = self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_tensor)
+            real_q_value2 = self.inner_critic_networks2[env_idx](inputs_norm_tensor, actions_tensor)
+            critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
+            critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
+
+        # Compute critic loss
+        # critic_loss = torch.nn.functional.mse_loss(real_q_value, target_q_value)
+        # critic_loss = (target_q_value - real_q_value).pow(2).mean()
+
+        # Compute actor loss
+        if meta:
+            if self.global_step % self.args.policy_delay == 0:
+                actions_real = self.actor_network(inputs_norm_tensor)
+                actor_loss = -self.critic_network1(inputs_norm_tensor, actions_real).mean()
+                actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
+                2).mean()
+            else:
+                actor_loss = torch.tensor(0.0, dtype=torch.float32)
+                if self.args.cuda:
+                    actor_loss = actor_loss.cuda()
+        else:
+            if self.global_step_env[env_idx] % self.args.policy_delay == 0:
+                actions_real = self.inner_actor_networks[env_idx](inputs_norm_tensor)
+                actor_loss = -self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_real).mean()
+                actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
+                2).mean()
+            else:
+                actor_loss = torch.tensor(0.0, dtype=torch.float32)
+                if self.args.cuda:
+                    actor_loss = actor_loss.cuda()
+
+        # Add action regularization to keep the actions in check
+        # actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(2).mean()
+
+        # log the losses for inner loop updates
+        if self.rank ==0 and not meta:
+            if self.global_step_env[env_idx] % self.args.policy_delay == 0:
+                self.writer.add_scalar(f"env_{env_idx}/actor_loss", actor_loss, self.global_step_env[env_idx])
+            self.writer.add_scalar(f"env_{env_idx}/critic_loss1", critic_loss1, self.global_step_env[env_idx])
+            self.writer.add_scalar(f"env_{env_idx}/critic_loss2", critic_loss2, self.global_step_env[env_idx])
+            if self.args.track:
+                if self.global_step_env[env_idx] % self.args.policy_delay == 0:
+                    wandb.log({f"env_{env_idx}/actor_loss": actor_loss}, step=self.global_step_env[env_idx])
+                wandb.log({f"env_{env_idx}/critic_loss1": critic_loss1}, step=self.global_step_env[env_idx])
+                wandb.log({f"env_{env_idx}/critic_loss2": critic_loss2}, step=self.global_step_env[env_idx])
+
+        return actor_loss, critic_loss1, critic_loss2
+
     def learnsd(self):
         """
         train the network
@@ -613,6 +737,12 @@ class td3_agent:
 
     # soft update
     def _soft_update_target_network(self, target, source):
+        """
+        Soft update the target network
+        :param target: target network
+        :param source: source network
+        :return:
+        """
         for target_param, param in zip(target.parameters(), source.parameters()):
             target_param.data.copy_((1 - self.args.polyak) * param.data + self.args.polyak * target_param.data)
 
