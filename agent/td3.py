@@ -25,6 +25,7 @@ class td3_agent:
     def __init__(self, args, envs, env_params_list, env_names, seed):
 
         self.log_interval = args.log_interval # for logging the training metrics
+        self.learning_starts = args.learning_starts  # learning starts after these many steps
 
         # Individual environment logging
         self.success_history_env = [[] for _ in range(len(envs))]
@@ -51,8 +52,8 @@ class td3_agent:
                 save_code=True,
             )
 
+        # Initialize the Tensorboard Summary Writer
         if self.rank == 0:
-            # Initialize the Tensorboard Summary Writer
             self.writer = SummaryWriter(f"runs/{self.run_name}")
             self.writer.add_text(
                 "hyperparameters",
@@ -60,49 +61,48 @@ class td3_agent:
             )
 
         self.args = args
-        self.env = env
-        self.env_params = env_params
+        self.envs = envs
+        self.env_params = env_params_list[0]  # assume all environments have the same action and observation spaces
+        self.env_params_list = env_params_list
+        self.env_names = env_names
         self._seed = seed
+
         # create the network
-        self.actor_network = actor(env_params)
-        self.critic_network1 = critic(env_params)
-        self.critic_network2 = critic(env_params)
+        self.actor_network = actor(self.env_params)
+        self.critic_network1 = critic(self.env_params)
+        self.critic_network2 = critic(self.env_params)
         # build up the target network
-        self.actor_target_network = actor(env_params)
-        self.critic_target_network1 = critic(env_params)
-        self.critic_target_network2 = critic(env_params)
+        self.actor_target_network = actor(self.env_params)
+        self.critic_target_network1 = critic(self.env_params)
+        self.critic_target_network2 = critic(self.env_params)
 
-        # todo: load the model
+        # Load the model if specified
         global_step = 0  # initialize the global step to 0
-        if self.args.load_model:
-            if self.rank == 0:
-                # models must be saved in the runs/{run_name} directory
-                load_path = f"runs/{args.load_run_name}/{args.load_model_name}"
-                # check if the file exists
-                if os.path.exists(load_path):
+        if self.args.load_model and self.rank == 0:
+            # models must be saved in the runs/{run_name} directory
+            load_path = f"runs/{args.load_run_name}/{args.load_model_name}"
+            # check if the file exists
+            if os.path.exists(load_path):
+                # log on the screen
+                print("\033[92m" + f"Loading model from {load_path}" + "\033[0m")
+                # load the model
+                checkpoint = torch.load(load_path)
+                # load the weights into the network
+                self.actor_network.load_state_dict(checkpoint['actor_state_dict'])
+                self.critic_network1.load_state_dict(checkpoint['critic_1_state_dict'])
+                self.critic_network2.load_state_dict(checkpoint['critic_2_state_dict'])
+                self.actor_target_network.load_state_dict(checkpoint['actor_target_state_dict'])
+                self.critic_target_network1.load_state_dict(checkpoint['critic_1_target_state_dict'])
+                self.critic_target_network2.load_state_dict(checkpoint['critic_2_target_state_dict'])
 
-                    # log on the screen
-                    print("\033[92m" + f"Loading model from {load_path}" + "\033[0m")
+                # load the global step
+                if self.args.continue_training_log:
+                    global_step = checkpoint['global_step']
 
-                    # load the model
-                    checkpoint = torch.load(load_path)
+            else:
+                raise FileNotFoundError(f"Model not found at {load_path}")
 
-                    # load the weights into the network
-                    self.actor_network.load_state_dict(checkpoint['actor_state_dict'])
-                    self.critic_network1.load_state_dict(checkpoint['critic_1_state_dict'])
-                    self.critic_network2.load_state_dict(checkpoint['critic_2_state_dict'])
-                    self.actor_target_network.load_state_dict(checkpoint['actor_target_state_dict'])
-                    self.critic_target_network1.load_state_dict(checkpoint['critic_1_target_state_dict'])
-                    self.critic_target_network2.load_state_dict(checkpoint['critic_2_target_state_dict'])
-
-                    # load the global step
-                    if self.args.continue_training_log:
-                        global_step = checkpoint['global_step']
-
-                else:
-                    raise FileNotFoundError(f"Model not found at {load_path}")
-
-        # load the global step if only we are continuing the training
+        # load the global step if only we are continuing the training (need to execute this in all the processes)
         if self.args.continue_training_log and self.args.load_model:
 
             # broadcast the global step to all the cpus
@@ -122,14 +122,11 @@ class td3_agent:
             actor_parm_cnt = self.count_trainable_parameters(self.actor_network)
             critic_1_parm_cnt = self.count_trainable_parameters(self.critic_network1)
             critic_2_parm_cnt = self.count_trainable_parameters(self.critic_network2)
-
-            # print in blue color
             print("\033[94m" + f"Actor trainable parameters: {actor_parm_cnt:,}" + "\033[0m")
             print("\033[94m" + f"Critic 1 trainable parameters: {critic_1_parm_cnt:,}" + "\033[0m")
             print("\033[94m" + f"Critic 2 trainable parameters: {critic_2_parm_cnt:,}" + "\033[0m")
 
-
-        # todo: we need to sync the target networks as well only if we are loading the model - Jay
+        # Sync the target networks
         if self.args.load_model:
             # sync the target networks
             sync_networks(self.actor_target_network)
@@ -156,49 +153,59 @@ class td3_agent:
         self.critic_optim2 = torch.optim.Adam(self.critic_network2.parameters(), lr=self.args.lr_critic)
 
         # her sampler
-        self.her_module = her_sampler(self.args.replay_strategy, self.args.replay_k, self.env.compute_reward)
+        self.her_modules = [her_sampler(self.args.replay_strategy, self.args.replay_k, env.compute_reward) for env in
+                            envs]
         # create the replay buffer
-        self.buffer = replay_buffer(self.env_params, self.args.buffer_size, self.her_module.sample_her_transitions)
+        self.buffers = [replay_buffer(env_params, self.args.buffer_size, her_module.sample_her_transitions)
+                              for env_params, her_module in zip(env_params_list, self.her_modules)]
 
         # todo: load the replay buffer (we need to do this in every process) - Jay
-        if self.args.load_replay_buffer and args.load_run_name is not None:
-
-            # check if the file exists
-            if os.path.exists(f'runs/{args.load_run_name}/replay_buffer.pkl'):
-                if self.rank == 0:
-                    print("\033[92m" + f"Loading replay buffer from runs/{args.load_run_name}/replay_buffer.pkl" + "\033[0m")
-
-                    # load the replay buffer
-                    with open(f'runs/{args.load_run_name}/replay_buffer.pkl', 'rb') as f:
-                        buffer_data = pickle.load(f)
-                else:
-                    buffer_data = None
-
-                # broadcast the buffer data to all the cpus
-                buffer_data = MPI.COMM_WORLD.bcast(buffer_data, root=0)
-
-                # load the buffer data into the buffer
-                if buffer_data is not None:
-                    self.buffer.buffers = buffer_data
-                    self.buffer.current_size = len(buffer_data['obs'])
-            else:
-                raise FileNotFoundError(f"Replay buffer not found at runs/{args.load_run_name}/replay_buffer.pkl")
+        # if self.args.load_replay_buffer and args.load_run_name is not None:
+        #
+        #     # check if the file exists
+        #     if os.path.exists(f'runs/{args.load_run_name}/replay_buffer.pkl'):
+        #         if self.rank == 0:
+        #             print("\033[92m" + f"Loading replay buffer from runs/{args.load_run_name}/replay_buffer.pkl" + "\033[0m")
+        #
+        #             # load the replay buffer
+        #             with open(f'runs/{args.load_run_name}/replay_buffer.pkl', 'rb') as f:
+        #                 buffer_data = pickle.load(f)
+        #         else:
+        #             buffer_data = None
+        #
+        #         # broadcast the buffer data to all the cpus
+        #         buffer_data = MPI.COMM_WORLD.bcast(buffer_data, root=0)
+        #
+        #         # load the buffer data into the buffer
+        #         if buffer_data is not None:
+        #             self.buffer.buffers = buffer_data
+        #             self.buffer.current_size = len(buffer_data['obs'])
+        #     else:
+        #         raise FileNotFoundError(f"Replay buffer not found at runs/{args.load_run_name}/replay_buffer.pkl")
 
         # create the normalizer
-        self.o_norm = normalizer(size=env_params['obs'], default_clip_range=self.args.clip_range)
-        self.g_norm = normalizer(size=env_params['goal'], default_clip_range=self.args.clip_range)
+        self.o_norms_list = [normalizer(size=env_params['obs'], default_clip_range=self.args.clip_range) for env_params
+                             in env_params_list]
+        self.g_norms_list = [normalizer(size=env_params['goal'], default_clip_range=self.args.clip_range) for env_params
+                             in env_params_list]
 
-        # create the dict for store the model
-        if MPI.COMM_WORLD.Get_rank() == 0:
+        # Create directory to store the model
+        if self.rank == 0:
             if not os.path.exists(self.args.save_dir):
                 os.mkdir(self.args.save_dir)
-            # path to save the model
-            # todo: updated the model path to include the run name - Jay
-            self.model_path = os.path.join(self.args.save_dir, self.args.env_name, self.run_name)
-
+            self.model_path = os.path.join(self.args.save_dir, self.args.exp_name, self.run_name)
             # create the directory if it doesn't exist
             if not os.path.exists(self.model_path):
                 os.makedirs(self.model_path)
+        self.model_path_maml =  f"runs/{self.run_name}/{self.exp_name}"
+
+        # let's save all the configurations
+        if self.rank == 0:
+            if not os.path.exists(self.model_path_maml):
+                os.makedirs(self.model_path_maml)
+            config_filename = os.path.join(self.model_path_maml, 'config.json')
+            with open(config_filename, 'w') as f:
+                json.dump(vars(args), f, indent=2)
 
     def learn(self):
         """
