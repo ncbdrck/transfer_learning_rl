@@ -33,6 +33,7 @@ class td3_agent:
         self.reward_history_env = [[] for _ in range(len(envs))]
         self.global_step_env = [0 for _ in range(len(envs))]
         self.global_step = 0  # for outer loop
+        self.update_counter = 0  # for inner loop
 
         # Variables for logging and saving the model
         self.exp_name: str = os.path.basename(__file__)[: -len(".py")]  # Name of the experiment
@@ -249,6 +250,91 @@ class td3_agent:
                 'critic_2_target_state_dict': self.critic_target_network2.state_dict(),
             }, self.model_path_maml)
 
+    def outer_loop(self, tasks):
+
+        # increase the global step
+        self.global_step += 1
+
+        for env_idx in tasks:
+            # update the inner networks
+            self.inner_loop(env_idx)
+
+        for _ in range(self.args.n_batches):
+            total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
+            total_critic_loss1 = torch.tensor(0.0, dtype=torch.float32)
+            total_critic_loss2 = torch.tensor(0.0, dtype=torch.float32)
+
+            if self.args.cuda:
+                total_actor_loss = total_actor_loss.cuda()
+                total_critic_loss1 = total_critic_loss1.cuda()
+                total_critic_loss2 = total_critic_loss2.cuda()
+
+            # calculate the meta loss for each environment
+            for env_idx in tasks:
+                actor_loss, critic_loss1,  critic_loss2= self.compute_loss(env_idx)
+                if self.args.debug:
+                    print(f"actor_loss: {type(actor_loss)},critic_loss1: {type(critic_loss1)}, "
+                          f"critic_loss2: {type(critic_loss2)}")
+                    # print meta_actor_loss so we can check if it has gradient tracking
+                    print(f"actor_loss: {actor_loss.requires_grad}")
+                    print(f"critic_loss1: {critic_loss1.requires_grad}")
+                    print(f"critic_loss2: {critic_loss2.requires_grad}")
+
+                # Accumulate losses
+                total_actor_loss += actor_loss
+                total_critic_loss1 += critic_loss1
+                total_critic_loss2 += critic_loss2
+
+            # Average the losses across tasks
+            total_actor_loss /= len(tasks)
+            total_critic_loss1 /= len(tasks)
+            total_critic_loss2 /= len(tasks)
+
+            if self.args.debug:
+                print(
+                    f"total_critic_loss1: {total_critic_loss1}, total_critic_loss2: {total_critic_loss2}, total_actor_loss: {total_actor_loss}")
+
+            # log the losses for meta updates
+            self.update_counter += 1
+            if self.rank == 0 and self.update_counter % 10 == 0:
+                if self.update_counter % self.args.policy_delay == 0:
+                    self.writer.add_scalar("rollout/meta_actor_loss", total_actor_loss, self.update_counter)
+                self.writer.add_scalar("rollout/meta_critic_loss1", total_critic_loss1, self.update_counter)
+                self.writer.add_scalar("rollout/meta_critic_loss2", total_critic_loss2, self.update_counter)
+                if self.args.track:
+                    if self.update_counter % self.args.policy_delay == 0:
+                        wandb.log({"rollout/meta_actor_loss": total_actor_loss}, step=self.update_counter)
+                    wandb.log({"rollout/meta_critic_loss1": total_critic_loss1}, step=self.update_counter)
+                    wandb.log({"rollout/meta_critic_loss2": total_critic_loss2}, step=self.update_counter)
+
+            if self.update_counter % self.args.policy_delay == 0:
+                # update the actor network
+                self.actor_optim.zero_grad()
+                total_actor_loss.backward()
+                sync_grads(self.actor_network)
+                self.actor_optim.step()
+
+            # update the critic_network1
+            self.critic_optim1.zero_grad()
+            total_critic_loss1.backward()
+            sync_grads(self.critic_network1)
+            self.critic_optim1.step()
+
+            # update the critic_network2
+            self.critic_optim2.zero_grad()
+            total_critic_loss2.backward()
+            sync_grads(self.critic_network2)
+            self.critic_optim2.step()
+
+            if self.update_counter % self.args.policy_delay == 0:
+                self._soft_update_target_network(self.actor_target_network, self.actor_network)
+                self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
+                self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
+
+        # soft update the target networks
+        self._soft_update_target_network(self.actor_target_network, self.actor_network)
+        self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
+        self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
 
     def learnsd(self):
         """
