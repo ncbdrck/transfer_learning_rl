@@ -271,7 +271,7 @@ class td3_agent:
 
             # calculate the meta loss for each environment
             for env_idx in tasks:
-                actor_loss, critic_loss1,  critic_loss2= self.compute_loss(env_idx)
+                actor_loss, critic_loss1, critic_loss2= self.compute_loss(env_idx)
                 if self.args.debug:
                     print(f"actor_loss: {type(actor_loss)},critic_loss1: {type(critic_loss1)}, "
                           f"critic_loss2: {type(critic_loss2)}")
