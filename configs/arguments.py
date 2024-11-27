@@ -71,8 +71,8 @@ def get_args_vanilla():
                         help='the delay in updating the policy')
 
     # todo: additional args for MAML TD3 - Jay
-    parser.add_argument('--multiple_tasks', type=bool, default=False, help='if toggled, this each MPI process will train on multiple different task')
-    parser.add_argument('--multi_num_tasks', type=int, default=2, help='the number of tasks to sample for training')
+    parser.add_argument('--multiple_tasks', type=bool, default=True, help='if toggled, this each MPI process will train on multiple different task')
+    parser.add_argument('--multi_num_tasks', type=int, default=3, help='the number of tasks to sample for training')
     parser.add_argument('--maml_alpha', type=float, default=0.001, help='the learning rate of the inner loop of MAML')  # typically this should be smaller than the learning rate of the outer loop
     parser.add_argument('--maml_beta', type=float, default=0.01, help='the learning rate of the outer loop of MAML')
     parser.add_argument('--maml_K', type=int, default=10, help='the number of episodes to sample for each iteration')
