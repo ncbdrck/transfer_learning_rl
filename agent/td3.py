@@ -424,225 +424,163 @@ class td3_agent:
 
         return actor_loss, critic_loss1, critic_loss2
 
-    def learnsd(self):
-        """
-        train the network
-        """
-        # start to collect samples
-        for epoch in range(self.args.n_epochs):
-            for _ in range(self.args.n_cycles):
-                mb_obs, mb_ag, mb_g, mb_actions = [], [], [], []
-                for _ in range(self.args.num_rollouts_per_mpi):
-                    # reset the rollouts
-                    ep_obs, ep_ag, ep_g, ep_actions = [], [], [], []
-                    # reset the environment
-                    # todo: in the gymnasium environment, the reset function returns a tuple
-                    # todo: also, there is no env.seed() function. so we need to pass the seed to the reset function
-                    observation, _ = self.env.reset(seed=self._seed)
-                    obs = observation['observation']
-                    ag = observation['achieved_goal']
-                    g = observation['desired_goal']
+    def inner_loop(self, env_idx):
 
-                    # todo: track if we are done - Jay
-                    ep_done = False
-                    ep_reward = 0  # initialize the episode reward to 0
+        # retrieve the task-specific variables
+        env = self.envs[env_idx]
 
-                    # start to collect samples
-                    for t in range(self.env_params['max_timesteps']):
-                        with torch.no_grad():
-                            input_tensor = self._preproc_inputs(obs, g)
-                            pi = self.actor_network(input_tensor)
-                            action = self._select_actions(pi)
-                        # feed the actions into the environment
-                        # todo: added r for reward, term for termination, trunc for truncation - Jay
-                        observation_new, r, term, trunc, info = self.env.step(action)
-                        obs_new = observation_new['observation']
-                        ag_new = observation_new['achieved_goal']
-                        # append rollouts
-                        ep_obs.append(obs.copy())
-                        ep_ag.append(ag.copy())
-                        ep_g.append(g.copy())
-                        ep_actions.append(action.copy())
-                        # re-assign the observation
-                        obs = obs_new
-                        ag = ag_new
+        # Sample K trajectories
+        mb_obs, mb_ag, mb_g, mb_actions = [], [], [], []
+        for _ in range(self.args.maml_K):
+            ep_obs, ep_ag, ep_g, ep_actions = [], [], [], []
+            observation, _ = env.reset(seed=self._seed)
+            obs = observation['observation']
+            ag = observation['achieved_goal']
+            g = observation['desired_goal']
+            ep_reward = 0
+            ep_done = False
 
-                        # todo: we need the global step for logging - Jay
-                        self.global_step += 1  # increment the global step
+            # todo: we can use the commented line below to use the max_timesteps for each environment
+            # for t in range(self.env_params_list[env_idx]['max_timesteps']):
+            for t in range(self.env_params['max_timesteps']):
+                with torch.no_grad():
+                    input_tensor = self._preproc_inputs(obs, g, env_idx)
+                    pi = self.inner_actor_networks[env_idx](input_tensor)
+                    action = self._select_actions(pi, env_idx)
+                observation_new, r, term, trunc, info = env.step(action)
+                obs_new = observation_new['observation']
+                ag_new = observation_new['achieved_goal']
 
-                        # todo: log the episode length and success rate
-                        ep_reward += r  # increment the episode reward
+                # store the episode
+                ep_obs.append(obs.copy())
+                ep_ag.append(ag.copy())
+                ep_g.append(g.copy())
+                ep_actions.append(action.copy())
 
-                        # todo: we have two extreme conditions
-                        # first extreme condition - termination due to success/failure
-                        # second extreme condition - termination due reaching the max_timesteps
-                        if term or trunc or t + 1 == self.env_params['max_timesteps'] and not ep_done:
-                            ep_done = True  # set the episode done flag to True
+                # update the variables
+                obs = obs_new
+                ag = ag_new
 
-                            # log the raw episode length
-                            if self.rank == 0:
-                                # log the episode length
-                                self.writer.add_scalar("charts/raw_ep_length", t + 1, self.global_step)
-                                if self.args.track:
-                                    wandb.log({"charts/raw_ep_length": t + 1}, step=self.global_step)
+                # for logging
+                self.global_step_env[env_idx] += 1
+                ep_reward += r
 
-                            # append the episode length to the ep_len_history
-                            self.ep_len_history.append(t + 1)
+                # check if the episode is done
+                if term or trunc or t + 1 == self.env_params['max_timesteps'] and not ep_done:
+                    ep_done = True
 
-                            # Calculate the episode length over the window of episodes to get the mean episode length
-                            if len(self.ep_len_history) >= self.ep_len_window:
-                                mean_ep_len = np.mean(self.ep_len_history[-self.ep_len_window:])
+                    # log the episode
+                    if self.rank == 0:
+                        self._log_episode(env_idx, t + 1, ep_reward, info.get('is_success', 0))
 
-                                # slice the ep_len_history to the window size so that it doesn't grow indefinitely
-                                self.ep_len_history = self.ep_len_history[-self.ep_len_window:]
+            ep_obs.append(obs.copy())
+            ep_ag.append(ag.copy())
+            mb_obs.append(ep_obs)
+            mb_ag.append(ep_ag)
+            mb_g.append(ep_g)
+            mb_actions.append(ep_actions)
 
-                            # if the episode length history is less than the window size, calculate the mean_ep_len
-                            else:
-                                mean_ep_len = np.mean(self.ep_len_history)
+        # convert them into np arrays
+        mb_obs = np.array(mb_obs)
+        mb_ag = np.array(mb_ag)
+        mb_g = np.array(mb_g)
+        mb_actions = np.array(mb_actions)
 
-                            # log the mean episode length
-                            if self.rank == 0:
-                                self.writer.add_scalar("charts/mean_ep_length", mean_ep_len, self.global_step)
-                                if self.args.track:
-                                    wandb.log({"charts/mean_ep_length": mean_ep_len}, step=self.global_step)
+        # store the episodes
+        self.inner_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
+        self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
+        # train the task-specific networks
+        for _ in range(self.args.n_batches):
+            inner_actor_loss, inner_critic_loss1, inner_critic_loss2 = self.compute_loss(env_idx)
 
+            # delayed update for the actor network
+            if self.global_step_env[env_idx] % self.args.policy_delay == 0:
+                self.inner_actor_optims[env_idx].zero_grad()
+                inner_actor_loss.backward()
+                self.inner_actor_optims[env_idx].step()
 
-                            # log the raw reward
-                            if self.rank == 0:
-                                self.writer.add_scalar("charts/raw_ep_reward", ep_reward, self.global_step)
-                                if self.args.track:
-                                    wandb.log({"charts/raw_ep_reward": ep_reward}, step=self.global_step)
+            # update the critic_network 1
+            self.inner_critic_optims1[env_idx].zero_grad()
+            inner_critic_loss1.backward()
+            self.inner_critic_optims1[env_idx].step()
 
-                            # append the reward to the reward history
-                            self.reward_history.append(ep_reward)
+            # update the critic_network 2
+            self.inner_critic_optims2[env_idx].zero_grad()
+            inner_critic_loss2.backward()
+            self.inner_critic_optims2[env_idx].step()
 
-                            # Calculate the reward over the window to get the mean reward
-                            if len(self.reward_history) >= self.reward_window:
-                                mean_reward = np.mean(self.reward_history[-self.reward_window:])
+            # delayed update for the actor network
+            if self.global_step_env[env_idx] % self.args.policy_delay == 0:
+                # we can update only when delayed update is done
+                self._soft_update_target_network(self.inner_actor_target_networks[env_idx],
+                                                 self.inner_actor_networks[env_idx])
+                self._soft_update_target_network(self.inner_critic_target_networks1[env_idx],
+                                                 self.inner_critic_networks1[env_idx])
+                self._soft_update_target_network(self.inner_critic_target_networks2[env_idx],
+                                                 self.inner_critic_networks2[env_idx])
 
-                                # slice the reward history to the window size so that it doesn't grow indefinitely
-                                self.reward_history = self.reward_history[-self.reward_window:]
+        # soft update the target networks
+        self._soft_update_target_network(self.inner_actor_target_networks[env_idx], self.inner_actor_networks[env_idx])
+        self._soft_update_target_network(self.inner_critic_target_networks1[env_idx],
+                                         self.inner_critic_networks1[env_idx])
+        self._soft_update_target_network(self.inner_critic_target_networks2[env_idx],
+                                         self.inner_critic_networks2[env_idx])
 
-                            # if the reward history is less than the window size, calculate the mean_reward
-                            else:
-                                mean_reward = np.mean(self.reward_history)
+        # Sample new trajectories using updated task-specific networks
+        mb_obs, mb_ag, mb_g, mb_actions = [], [], [], []
+        for _ in range(self.args.maml_K):
+            ep_obs, ep_ag, ep_g, ep_actions = [], [], [], []
+            observation, _ = env.reset(seed=self._seed)
+            obs = observation['observation']
+            ag = observation['achieved_goal']
+            g = observation['desired_goal']
+            ep_reward = 0
+            ep_done = False
 
-                            # log the mean reward
-                            if self.rank == 0:
-                                self.writer.add_scalar("charts/mean_reward", mean_reward, self.global_step)
-                                if self.args.track:
-                                    wandb.log({"charts/mean_reward": mean_reward}, step=self.global_step)
+            # todo: we can use the commented line below to use the max_timesteps for each environment
+            # for t in range(self.env_params_list[env_idx]['max_timesteps']):
+            for t in range(self.env_params['max_timesteps']):
+                with torch.no_grad():
+                    input_tensor = self._preproc_inputs(obs, g, env_idx)
+                    pi = self.inner_actor_networks[env_idx](input_tensor)
+                    action = self._select_actions(pi, env_idx)
+                observation_new, r, term, trunc, info = env.step(action)
+                obs_new = observation_new['observation']
+                ag_new = observation_new['achieved_goal']
 
+                ep_obs.append(obs.copy())
+                ep_ag.append(ag.copy())
+                ep_g.append(g.copy())
+                ep_actions.append(action.copy())
+                obs = obs_new
+                ag = ag_new
+                ep_reward += r
+                self.global_step_env[env_idx] += 1
 
+                if term or trunc or t + 1 == self.env_params['max_timesteps'] and not ep_done:
+                    ep_done = True
 
-                            # log the success rate
-                            if "is_success" in info:
-                                # Extract the success value from the 'is_success' key
-                                success = info["is_success"]
+                    # log the episode
+                    if self.rank == 0:
+                        self._log_episode(env_idx, t + 1, ep_reward, info.get('is_success', 0))
 
-                                # Log raw success for environments where the episode terminated
-                                if self.rank == 0:
-                                    self.writer.add_scalar("charts/success_rate", success, self.global_step)
-                                    if self.args.track:
-                                        wandb.log({"charts/success_rate": success}, step=self.global_step)
+            ep_obs.append(obs.copy())
+            ep_ag.append(ag.copy())
+            mb_obs.append(ep_obs)
+            mb_ag.append(ep_ag)
+            mb_g.append(ep_g)
+            mb_actions.append(ep_actions)
 
-                                # Append the success rate to the success history
-                                self.success_history.append(success)
+        mb_obs = np.array(mb_obs)
+        mb_ag = np.array(mb_ag)
+        mb_g = np.array(mb_g)
+        mb_actions = np.array(mb_actions)
 
-                                # Calculate the success rate over the window
-                                if len(self.success_history) >= self.success_window:
-                                    mean_success_rate = np.mean(self.success_history[-self.success_window:])
-
-                                    # Slice the success history to the window size so that it doesn't grow indefinitely
-                                    self.success_history = self.success_history[-self.success_window:]
-
-                                # if the success history is less than the window size, calculate the mean_success_rate
-                                else:
-                                    mean_success_rate = np.mean(self.success_history)
-
-                                # log the mean success rate
-                                if self.rank == 0:
-                                    self.writer.add_scalar("charts/mean_success_rate", mean_success_rate,
-                                                           self.global_step)
-                                    if self.args.track:
-                                        wandb.log({"charts/mean_success_rate": mean_success_rate},
-                                                  step=self.global_step)
-
-                    ep_obs.append(obs.copy())  # append the last observation
-                    ep_ag.append(ag.copy())  # append the last achieved goal
-                    mb_obs.append(ep_obs)
-                    mb_ag.append(ep_ag)
-                    mb_g.append(ep_g)
-                    mb_actions.append(ep_actions)
-
-                # convert them into arrays
-                mb_obs = np.array(mb_obs)
-                mb_ag = np.array(mb_ag)
-                mb_g = np.array(mb_g)
-                mb_actions = np.array(mb_actions)
-
-                # store the episodes
-                self.buffer.store_episode([mb_obs, mb_ag, mb_g, mb_actions])
-                self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions])
-                for _ in range(self.args.n_batches):
-                    # train the network
-                    self._update_network()
-
-                # soft update
-                self._soft_update_target_network(self.actor_target_network, self.actor_network)
-                self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
-                self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
-
-            # start to do the evaluation
-            success_rate, reward, ep_len = self._eval_agent()
-            if MPI.COMM_WORLD.Get_rank() == 0:
-                print('[{}] epoch is: {}, eval success rate is: {:.3f}'.format(datetime.now(), epoch+1, success_rate))
-
-                # todo: log the success rate, reward and ep len - original code
-                self.writer.add_scalar("rollouts/eval_success_rate", success_rate, epoch)
-                self.writer.add_scalar("rollouts/eval_reward", reward, epoch)
-                self.writer.add_scalar("rollouts/eval_ep_len", ep_len, epoch)
-                if self.args.track:
-                    wandb.log({"rollouts/eval_success_rate": success_rate}, step=epoch)
-                    wandb.log({"rollouts/eval_reward": reward}, step=epoch)
-                    wandb.log({"rollouts/eval_ep_len": ep_len}, step=epoch)
-
-                torch.save([self.o_norm.mean, self.o_norm.std, self.g_norm.mean, self.g_norm.std,
-                            self.actor_network.state_dict()], \
-                           self.model_path + '/model.pt')
-                # we can use this for demonstration - use the code already implemented - demo.py
-
-        # todo: we can save the model here - Jay
-        # todo; with this we only save the model once at the end of the training
-        if self.rank == 0:
-            if self.args.save_model:
-                model_path = f"runs/{self.run_name}/{self.exp_name}.td3_her"
-
-                print("\033[92m" + f"Saving the model at {model_path}" + "\033[0m")
-
-                torch.save({
-                    'actor_state_dict': self.actor_network.state_dict(),
-                    'critic_state_dict1': self.critic_network1.state_dict(),
-                    'critic_state_dict2': self.critic_network2.state_dict(),
-                    'actor_target_state_dict': self.actor_target_network.state_dict(),
-                    'critic_target_state_dict1': self.critic_target_network1.state_dict(),
-                    'critic_target_state_dict2': self.critic_target_network2.state_dict(),
-                    'o_norm_mean': self.o_norm.mean,
-                    'o_norm_std': self.o_norm.std,
-                    'g_norm_mean': self.g_norm.mean,
-                    'g_norm_std': self.g_norm.std,
-                    'global_step': self.global_step,
-                }, model_path)
-
-            if self.args.save_replay_buffer:
-                # save the replay buffer
-                with open(f'runs/{self.run_name}/replay_buffer.pkl', 'wb') as f:
-                    pickle.dump(self.buffer.buffers, f)
-
-                print("\033[92m" + f"Replay buffer saved at runs/{self.run_name}/replay_buffer.pkl" + "\033[0m")
-        # todo: close all the processes
-        self.env.close()
+        # clear and store the episodes in the meta replay buffer
+        self.meta_buffers[env_idx].clear_buffer()
+        self.meta_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
+        self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
     # pre_process the inputs
     def _preproc_inputs(self, obs, g):
