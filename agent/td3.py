@@ -27,7 +27,7 @@ class td3_agent:
         self.log_interval = args.log_interval # for logging the training metrics
         self.learning_starts = args.learning_starts  # learning starts after these many steps
 
-        # Individual environment logging
+        # Individual environment logging as well as for dynamic gradient updates
         self.success_history_env = [[] for _ in range(len(envs))]
         self.ep_len_history_env = [[] for _ in range(len(envs))]
         self.reward_history_env = [[] for _ in range(len(envs))]
@@ -156,33 +156,10 @@ class td3_agent:
         # her sampler
         self.her_modules = [her_sampler(self.args.replay_strategy, self.args.replay_k, env.compute_reward) for env in
                             envs]
+
         # create the replay buffer
         self.buffers = [replay_buffer(env_params, self.args.buffer_size, her_module.sample_her_transitions)
                               for env_params, her_module in zip(env_params_list, self.her_modules)]
-
-        # todo: load the replay buffer (we need to do this in every process) - Jay
-        # if self.args.load_replay_buffer and args.load_run_name is not None:
-        #
-        #     # check if the file exists
-        #     if os.path.exists(f'runs/{args.load_run_name}/replay_buffer.pkl'):
-        #         if self.rank == 0:
-        #             print("\033[92m" + f"Loading replay buffer from runs/{args.load_run_name}/replay_buffer.pkl" + "\033[0m")
-        #
-        #             # load the replay buffer
-        #             with open(f'runs/{args.load_run_name}/replay_buffer.pkl', 'rb') as f:
-        #                 buffer_data = pickle.load(f)
-        #         else:
-        #             buffer_data = None
-        #
-        #         # broadcast the buffer data to all the cpus
-        #         buffer_data = MPI.COMM_WORLD.bcast(buffer_data, root=0)
-        #
-        #         # load the buffer data into the buffer
-        #         if buffer_data is not None:
-        #             self.buffer.buffers = buffer_data
-        #             self.buffer.current_size = len(buffer_data['obs'])
-        #     else:
-        #         raise FileNotFoundError(f"Replay buffer not found at runs/{args.load_run_name}/replay_buffer.pkl")
 
         # create the normalizer
         self.o_norms_list = [normalizer(size=env_params['obs'], default_clip_range=self.args.clip_range) for env_params
@@ -207,23 +184,6 @@ class td3_agent:
             config_filename = os.path.join(self.model_path_maml, 'config.json')
             with open(config_filename, 'w') as f:
                 json.dump(vars(args), f, indent=2)
-
-    def sample_tasks(self):
-        """
-        Sample a list of tasks for the meta-update
-        :return: return a list of tasks
-        """
-        # sample multiple tasks
-        if self.args.multiple_tasks:
-            # sample the specific number of tasks if the number of tasks is less than the number of environments
-            if self.args.multi_num_tasks < len(self.envs):
-                return np.random.randint(0, len(self.envs), size=self.args.multi_num_tasks).tolist()
-            else:
-                # if the number of tasks is greater than the number of environments, sample all the environments
-                return list(range(len(self.envs)))
-        else:
-            # sample a single task
-            return [np.random.randint(0, len(self.envs))]
 
     def learn(self):
         """
@@ -250,19 +210,43 @@ class td3_agent:
                 'critic_2_target_state_dict': self.critic_target_network2.state_dict(),
             }, self.model_path_maml)
 
+    def sample_tasks(self):
+        """
+        Sample a list of tasks to loop over. This is used for multitask learning
+        :return: return a list of tasks
+        """
+        # sample multiple tasks
+        if self.args.multiple_tasks:
+            # sample the specific number of tasks if the number of tasks is less than the number of environments
+            if self.args.multi_num_tasks < len(self.envs):
+                return np.random.randint(0, len(self.envs), size=self.args.multi_num_tasks).tolist()
+            else:
+                # if the number of tasks is greater than the number of environments, sample all the environments (default)
+                return list(range(len(self.envs)))
+        else:
+            # sample a single task
+            return [np.random.randint(0, len(self.envs))]
+
     def outer_loop(self, tasks):
+        """
+        We loop over the tasks and update the networks
+        :param tasks: List of tasks
+        """
 
         # increase the global step
         self.global_step += 1
 
         for env_idx in tasks:
-            # update the inner networks
+            # sample the trajectories
             self.inner_loop(env_idx)
 
         for _ in range(self.args.n_batches):
             total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
             total_critic_loss1 = torch.tensor(0.0, dtype=torch.float32)
             total_critic_loss2 = torch.tensor(0.0, dtype=torch.float32)
+
+            # increase the update counter
+            self.update_counter += 1
 
             if self.args.cuda:
                 total_actor_loss = total_actor_loss.cuda()
@@ -273,12 +257,12 @@ class td3_agent:
             for env_idx in tasks:
                 actor_loss, critic_loss1, critic_loss2= self.compute_loss(env_idx)
                 if self.args.debug:
-                    print(f"actor_loss: {type(actor_loss)},critic_loss1: {type(critic_loss1)}, "
+                    print(f"env:{env_idx} actor_loss: {type(actor_loss)},critic_loss1: {type(critic_loss1)}, "
                           f"critic_loss2: {type(critic_loss2)}")
                     # print meta_actor_loss so we can check if it has gradient tracking
-                    print(f"actor_loss: {actor_loss.requires_grad}")
-                    print(f"critic_loss1: {critic_loss1.requires_grad}")
-                    print(f"critic_loss2: {critic_loss2.requires_grad}")
+                    print(f"env:{env_idx} actor_loss: {actor_loss.requires_grad}")
+                    print(f"env:{env_idx} critic_loss1: {critic_loss1.requires_grad}")
+                    print(f"env:{env_idx} critic_loss2: {critic_loss2.requires_grad}")
 
                 # Accumulate losses
                 total_actor_loss += actor_loss
@@ -295,7 +279,6 @@ class td3_agent:
                     f"total_critic_loss1: {total_critic_loss1}, total_critic_loss2: {total_critic_loss2}, total_actor_loss: {total_actor_loss}")
 
             # log the losses for meta updates
-            self.update_counter += 1
             if self.rank == 0 and self.update_counter % 10 == 0:
                 if self.update_counter % self.args.policy_delay == 0:
                     self.writer.add_scalar("rollout/meta_actor_loss", total_actor_loss, self.update_counter)
@@ -336,18 +319,18 @@ class td3_agent:
         self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
         self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
 
-    def evaluation_and_logging_cycle(self, step, epoch):
+    def evaluation_and_logging_cycle(self, cycle, epoch):
         """
         Evaluate the agent and log the results
 
         :param epoch: The current epoch
-        :param step: The current step
+        :param cycle: The current cycle
         :return:
         """
 
         success_rate, reward, ep_len = self.evaluate_agent()
         if MPI.COMM_WORLD.Get_rank() == 0:
-            print(f'[{datetime.now()}] Epoch: {epoch+1}, Cycle : {step + 1}, eval success rate: {success_rate:.3f}')
+            print(f'[{datetime.now()}] Epoch: {epoch+1}, Cycle : {cycle + 1}, eval success rate: {success_rate:.3f}')
             self.writer.add_scalar("Cycle/eval_success_rate", success_rate, self.global_step)
             self.writer.add_scalar("Cycle/eval_reward", reward, self.global_step)
             self.writer.add_scalar("Cycle/eval_ep_len", ep_len, self.global_step)
@@ -396,67 +379,48 @@ class td3_agent:
         with torch.no_grad():
             noise = (torch.randn_like(actions_tensor) * self.args.policy_noise).clamp(-self.args.noise_clip,
                                                                                       self.args.noise_clip)
-            actions_next = (self.inner_actor_target_networks[env_idx](inputs_next_norm_tensor) + noise).clamp(
+            actions_next = (self.actor_target_network[env_idx](inputs_next_norm_tensor) + noise).clamp(
                 -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
-            q_target1 = self.inner_critic_target_networks1[env_idx](inputs_next_norm_tensor, actions_next)
-            q_target2 = self.inner_critic_target_networks2[env_idx](inputs_next_norm_tensor, actions_next)
+            q_target1 = self.critic_target_network1[env_idx](inputs_next_norm_tensor, actions_next)
+            q_target2 = self.critic_target_network2[env_idx](inputs_next_norm_tensor, actions_next)
             q_target = torch.min(q_target1, q_target2)
             target_q_value = r_tensor + self.args.gamma * q_target
             clip_return = 1 / (1 - self.args.gamma)
             target_q_value = torch.clamp(target_q_value, -clip_return, 0)
 
         # Compute current Q-values and the critic loss
-        if meta:
-            real_q_value1 = self.critic_network1(inputs_norm_tensor, actions_tensor)
-            real_q_value2 = self.critic_network2(inputs_norm_tensor, actions_tensor)
-            critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
-            critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
-        else:
-            real_q_value1 = self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_tensor)
-            real_q_value2 = self.inner_critic_networks2[env_idx](inputs_norm_tensor, actions_tensor)
-            critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
-            critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
+        real_q_value1 = self.critic_network1(inputs_norm_tensor, actions_tensor)
+        real_q_value2 = self.critic_network2(inputs_norm_tensor, actions_tensor)
+        critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
+        critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
 
         # Compute critic loss
         # critic_loss = torch.nn.functional.mse_loss(real_q_value, target_q_value)
         # critic_loss = (target_q_value - real_q_value).pow(2).mean()
 
         # Compute actor loss
-        if meta:
-            if self.global_step % self.args.policy_delay == 0:
-                actions_real = self.actor_network(inputs_norm_tensor)
-                actor_loss = -self.critic_network1(inputs_norm_tensor, actions_real).mean()
-                actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
-                2).mean()
-            else:
-                actor_loss = torch.tensor(0.0, dtype=torch.float32)
-                if self.args.cuda:
-                    actor_loss = actor_loss.cuda()
+        if self.update_counter % self.args.policy_delay == 0:
+            actions_real = self.actor_network(inputs_norm_tensor)
+            actor_loss = -self.critic_network1(inputs_norm_tensor, actions_real).mean()
+            # Add action regularization to keep the actions in check
+            actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
+            2).mean()
         else:
-            if self.global_step_env[env_idx] % self.args.policy_delay == 0:
-                actions_real = self.inner_actor_networks[env_idx](inputs_norm_tensor)
-                actor_loss = -self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_real).mean()
-                actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
-                2).mean()
-            else:
-                actor_loss = torch.tensor(0.0, dtype=torch.float32)
-                if self.args.cuda:
-                    actor_loss = actor_loss.cuda()
-
-        # Add action regularization to keep the actions in check
-        # actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(2).mean()
+            actor_loss = torch.tensor(0.0, dtype=torch.float32)
+            if self.args.cuda:
+                actor_loss = actor_loss.cuda()
 
         # log the losses for inner loop updates
-        if self.rank ==0 and not meta:
-            if self.global_step_env[env_idx] % self.args.policy_delay == 0:
-                self.writer.add_scalar(f"env_{env_idx}/actor_loss", actor_loss, self.global_step_env[env_idx])
-            self.writer.add_scalar(f"env_{env_idx}/critic_loss1", critic_loss1, self.global_step_env[env_idx])
-            self.writer.add_scalar(f"env_{env_idx}/critic_loss2", critic_loss2, self.global_step_env[env_idx])
+        if self.rank ==0:
+            if self.update_counter % self.args.policy_delay == 0:
+                self.writer.add_scalar(f"env_{env_idx}/actor_loss", actor_loss, self.update_counter)
+            self.writer.add_scalar(f"env_{env_idx}/critic_loss1", critic_loss1, self.update_counter)
+            self.writer.add_scalar(f"env_{env_idx}/critic_loss2", critic_loss2, self.update_counter)
             if self.args.track:
-                if self.global_step_env[env_idx] % self.args.policy_delay == 0:
-                    wandb.log({f"env_{env_idx}/actor_loss": actor_loss}, step=self.global_step_env[env_idx])
-                wandb.log({f"env_{env_idx}/critic_loss1": critic_loss1}, step=self.global_step_env[env_idx])
-                wandb.log({f"env_{env_idx}/critic_loss2": critic_loss2}, step=self.global_step_env[env_idx])
+                if self.update_counter % self.args.policy_delay == 0:
+                    wandb.log({f"env_{env_idx}/actor_loss": actor_loss}, step=self.update_counter)
+                wandb.log({f"env_{env_idx}/critic_loss1": critic_loss1}, step=self.update_counter)
+                wandb.log({f"env_{env_idx}/critic_loss2": critic_loss2}, step=self.update_counter)
 
         return actor_loss, critic_loss1, critic_loss2
 
@@ -735,7 +699,6 @@ class td3_agent:
         g = np.clip(g, -self.args.clip_obs, self.args.clip_obs)
         return o, g
 
-    # soft update
     def _soft_update_target_network(self, target, source):
         """
         Soft update the target network
