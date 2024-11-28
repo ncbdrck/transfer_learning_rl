@@ -389,10 +389,10 @@ class TD3_Agent:
         with torch.no_grad():
             noise = (torch.randn_like(actions_tensor) * self.args.policy_noise).clamp(-self.args.noise_clip,
                                                                                       self.args.noise_clip)
-            actions_next = (self.actor_target_network[env_idx](inputs_next_norm_tensor) + noise).clamp(
+            actions_next = (self.actor_target_network(inputs_next_norm_tensor) + noise).clamp(
                 -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
-            q_target1 = self.critic_target_network1[env_idx](inputs_next_norm_tensor, actions_next)
-            q_target2 = self.critic_target_network2[env_idx](inputs_next_norm_tensor, actions_next)
+            q_target1 = self.critic_target_network1(inputs_next_norm_tensor, actions_next)
+            q_target2 = self.critic_target_network2(inputs_next_norm_tensor, actions_next)
             q_target = torch.min(q_target1, q_target2)
             target_q_value = r_tensor + self.args.gamma * q_target
             clip_return = 1 / (1 - self.args.gamma)
