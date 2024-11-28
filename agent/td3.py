@@ -21,7 +21,7 @@ TD3 with HER (MPI-version) for multi-task learning
 """
 
 
-class td3_agent:
+class TD3_Agent:
     def __init__(self, args, envs, env_params_list, env_names, seed):
 
         self.log_interval = args.log_interval # for logging the training metrics
@@ -253,7 +253,7 @@ class td3_agent:
                 total_critic_loss1 = total_critic_loss1.cuda()
                 total_critic_loss2 = total_critic_loss2.cuda()
 
-            # calculate the meta loss for each environment
+            # calculate the loss for each environment
             for env_idx in tasks:
                 actor_loss, critic_loss1, critic_loss2= self.compute_loss(env_idx)
                 if self.args.debug:
@@ -275,20 +275,20 @@ class td3_agent:
             total_critic_loss2 /= len(tasks)
 
             if self.args.debug:
-                print(
-                    f"total_critic_loss1: {total_critic_loss1}, total_critic_loss2: {total_critic_loss2}, total_actor_loss: {total_actor_loss}")
+                print(f"update counter: {self.update_counter}, total_critic_loss1: {total_critic_loss1}, "
+                      f"total_critic_loss2: {total_critic_loss2}, total_actor_loss: {total_actor_loss}")
 
-            # log the losses for meta updates
+            # log the losses for each updates
             if self.rank == 0 and self.update_counter % 10 == 0:
                 if self.update_counter % self.args.policy_delay == 0:
-                    self.writer.add_scalar("rollout/meta_actor_loss", total_actor_loss, self.update_counter)
-                self.writer.add_scalar("rollout/meta_critic_loss1", total_critic_loss1, self.update_counter)
-                self.writer.add_scalar("rollout/meta_critic_loss2", total_critic_loss2, self.update_counter)
+                    self.writer.add_scalar("rollout/actor_loss", total_actor_loss, self.update_counter)
+                self.writer.add_scalar("rollout/critic_loss1", total_critic_loss1, self.update_counter)
+                self.writer.add_scalar("rollout/critic_loss2", total_critic_loss2, self.update_counter)
                 if self.args.track:
                     if self.update_counter % self.args.policy_delay == 0:
-                        wandb.log({"rollout/meta_actor_loss": total_actor_loss}, step=self.update_counter)
-                    wandb.log({"rollout/meta_critic_loss1": total_critic_loss1}, step=self.update_counter)
-                    wandb.log({"rollout/meta_critic_loss2": total_critic_loss2}, step=self.update_counter)
+                        wandb.log({"rollout/actor_loss": total_actor_loss}, step=self.update_counter)
+                    wandb.log({"rollout/critic_loss1": total_critic_loss1}, step=self.update_counter)
+                    wandb.log({"rollout/critic_loss2": total_critic_loss2}, step=self.update_counter)
 
             if self.update_counter % self.args.policy_delay == 0:
                 # update the actor network
@@ -440,7 +440,7 @@ class td3_agent:
             ep_reward = 0
             ep_done = False
 
-
+            # loop over the max number of timesteps
             for t in range(self.env_params_list[env_idx]['max_timesteps']):
                 with torch.no_grad():
                     input_tensor = self._preproc_inputs(obs, g, env_idx)
