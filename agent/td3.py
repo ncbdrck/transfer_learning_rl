@@ -429,9 +429,9 @@ class td3_agent:
         # retrieve the task-specific variables
         env = self.envs[env_idx]
 
-        # Sample K trajectories
+        # Sample trajectories
         mb_obs, mb_ag, mb_g, mb_actions = [], [], [], []
-        for _ in range(self.args.maml_K):
+        for _ in range(self.args.num_rollouts_per_env):
             ep_obs, ep_ag, ep_g, ep_actions = [], [], [], []
             observation, _ = env.reset(seed=self._seed)
             obs = observation['observation']
@@ -440,12 +440,11 @@ class td3_agent:
             ep_reward = 0
             ep_done = False
 
-            # todo: we can use the commented line below to use the max_timesteps for each environment
-            # for t in range(self.env_params_list[env_idx]['max_timesteps']):
-            for t in range(self.env_params['max_timesteps']):
+
+            for t in range(self.env_params_list[env_idx]['max_timesteps']):
                 with torch.no_grad():
                     input_tensor = self._preproc_inputs(obs, g, env_idx)
-                    pi = self.inner_actor_networks[env_idx](input_tensor)
+                    pi = self.actor_network(input_tensor)
                     action = self._select_actions(pi, env_idx)
                 observation_new, r, term, trunc, info = env.step(action)
                 obs_new = observation_new['observation']
@@ -582,16 +581,27 @@ class td3_agent:
         self.meta_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
         self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
-    # pre_process the inputs
-    def _preproc_inputs(self, obs, g):
-        obs_norm = self.o_norm.normalize(obs)
-        g_norm = self.g_norm.normalize(g)
-        # concatenate the stuffs
+    def _preproc_inputs(self, obs, g, env_idx):
+        """
+        Preprocess the inputs for the networks
+
+        :param obs:
+        :param g:
+        :param env_idx:
+        :return: inputs_tensor for the networks
+        """
+
+        # retrieve the normalizers
+        o_norm = self.o_norms_list[env_idx]
+        g_norm = self.g_norms_list[env_idx]
+
+        obs_norm = o_norm.normalize(obs)
+        g_norm = g_norm.normalize(g)
         inputs = np.concatenate([obs_norm, g_norm])
-        inputs = torch.tensor(inputs, dtype=torch.float32).unsqueeze(0)
+        inputs_tensor = torch.tensor(inputs, dtype=torch.float32).unsqueeze(0)
         if self.args.cuda:
-            inputs = inputs.cuda()
-        return inputs
+            inputs_tensor = inputs_tensor.cuda()
+        return inputs_tensor
 
     # this function will choose action for the agent and do the exploration
     def _select_actions(self, pi):

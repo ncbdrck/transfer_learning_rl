@@ -34,7 +34,7 @@ def get_args_vanilla():
     parser.add_argument('--clip-range', type=float, default=5, help='the clip range')
     parser.add_argument('--demo-length', type=int, default=20, help='the demo length')
     parser.add_argument('--cuda', action='store_true', help='if use gpu do the acceleration')
-    parser.add_argument('--num-rollouts-per-mpi', type=int, default=2, help='the rollouts per mpi')
+    parser.add_argument('--num-rollouts-per-mpi', type=int, default=2, help='the rollouts per mpi')  # we did not use this
 
     # Additional args for logging and saving the model
     parser.add_argument('--track', type=bool, default=False,
@@ -71,15 +71,14 @@ def get_args_vanilla():
                         help='the delay in updating the policy')
 
     # todo: additional args for MAML TD3 - Jay
-    parser.add_argument('--multiple_tasks', type=bool, default=True, help='if toggled, this each MPI process will train on multiple different task')
+    parser.add_argument('--multiple_tasks', type=bool, default=True,
+                        help='if toggled, this each MPI process will train on multiple different task')
     parser.add_argument('--multi_num_tasks', type=int, default=3, help='the number of tasks to sample for training')
-    parser.add_argument('--maml_alpha', type=float, default=0.001, help='the learning rate of the inner loop of MAML')  # typically this should be smaller than the learning rate of the outer loop
-    parser.add_argument('--maml_beta', type=float, default=0.01, help='the learning rate of the outer loop of MAML')
-    parser.add_argument('--maml_K', type=int, default=10, help='the number of episodes to sample for each iteration')
+    parser.add_argument('--num-rollouts-per-env', type=int, default=2,
+                        help='the number of episodes to sample for each iteration')
+
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
-    parser.add_argument('--n-meta-batches', type=int, default=80,
-                        help='the times to update the main model in the outer loop')
     parser.add_argument('--tune_all_maml_hyperparameters', type=bool, default=True,
                         help='if toggled, all hyperparameters for MAML will be tuned')
     parser.add_argument('--meta_args_lr', type=float, default=0.01, help='the learning rate of the meta-args')
