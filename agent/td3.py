@@ -339,6 +339,16 @@ class TD3_Agent:
                 wandb.log({"Cycle/eval_reward": reward}, step=self.global_step)
                 wandb.log({"Cycle/eval_ep_len": ep_len}, step=self.global_step)
 
+    def _soft_update_target_network(self, target, source):
+        """
+        Soft update the target network
+        :param target: target network
+        :param source: source network
+        :return:
+        """
+        for target_param, param in zip(target.parameters(), source.parameters()):
+            target_param.data.copy_((1 - self.args.polyak) * param.data + self.args.polyak * target_param.data)
+
     def compute_loss(self, env_idx):
         """
         Compute the actor and critic loss
@@ -617,171 +627,110 @@ class TD3_Agent:
         g = np.clip(g, -self.args.clip_obs, self.args.clip_obs)
         return o, g
 
-    def _soft_update_target_network(self, target, source):
-        """
-        Soft update the target network
-        :param target: target network
-        :param source: source network
-        :return:
-        """
-        for target_param, param in zip(target.parameters(), source.parameters()):
-            target_param.data.copy_((1 - self.args.polyak) * param.data + self.args.polyak * target_param.data)
+    @staticmethod
+    def count_trainable_parameters(model):
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-    # update the network
-    def _update_network(self):
-        # sample the episodes
-        transitions = self.buffer.sample(self.args.batch_size)
-        # pre-process the observation and goal
-        o, o_next, g = transitions['obs'], transitions['obs_next'], transitions['g']
-        transitions['obs'], transitions['g'] = self._preproc_og(o, g)
-        transitions['obs_next'], transitions['g_next'] = self._preproc_og(o_next, g)
-        # start to do the update
-        obs_norm = self.o_norm.normalize(transitions['obs'])
-        g_norm = self.g_norm.normalize(transitions['g'])
-        inputs_norm = np.concatenate([obs_norm, g_norm], axis=1)
-        obs_next_norm = self.o_norm.normalize(transitions['obs_next'])
-        g_next_norm = self.g_norm.normalize(transitions['g_next'])
-        inputs_next_norm = np.concatenate([obs_next_norm, g_next_norm], axis=1)
-        # transfer them into the tensor
-        inputs_norm_tensor = torch.tensor(inputs_norm, dtype=torch.float32)
-        inputs_next_norm_tensor = torch.tensor(inputs_next_norm, dtype=torch.float32)
-        actions_tensor = torch.tensor(transitions['actions'], dtype=torch.float32)
-        r_tensor = torch.tensor(transitions['r'], dtype=torch.float32)
-        if self.args.cuda:
-            inputs_norm_tensor = inputs_norm_tensor.cuda()
-            inputs_next_norm_tensor = inputs_next_norm_tensor.cuda()
-            actions_tensor = actions_tensor.cuda()
-            r_tensor = r_tensor.cuda()
-        # calculate the target Q value function
-        with torch.no_grad():
-            # do the normalization
-            # concatenate the stuffs
-            # target policy smoothing
-            noise = (torch.randn_like(actions_tensor) * self.args.policy_noise).clamp(-self.args.noise_clip,
-                                                                                      self.args.noise_clip)
-            actions_next = (self.actor_target_network(inputs_next_norm_tensor) + noise).clamp(
-                -self.env_params['action_max'], self.env_params['action_max'])
-            q_target1 = self.critic_target_network1(inputs_next_norm_tensor, actions_next)
-            q_target2 = self.critic_target_network2(inputs_next_norm_tensor, actions_next)
-            q_target = torch.min(q_target1, q_target2)
-            target_q_value = r_tensor + self.args.gamma * q_target
-
-            # clip the q value
-            clip_return = 1 / (1 - self.args.gamma)
-            target_q_value = torch.clamp(target_q_value, -clip_return, 0)
-
-        # the q loss
-        real_q_value1 = self.critic_network1(inputs_norm_tensor, actions_tensor)
-        real_q_value2 = self.critic_network2(inputs_norm_tensor, actions_tensor)
-        critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
-        critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
-
-        # update the critic_network
-        self.critic_optim1.zero_grad()
-        critic_loss1.backward()
-        sync_grads(self.critic_network1)
-        self.critic_optim1.step()
-
-        self.critic_optim2.zero_grad()
-        critic_loss2.backward()
-        sync_grads(self.critic_network2)
-        self.critic_optim2.step()
-
-        # delayed update for the actor network
-        if self.global_step % self.args.policy_delay == 0:
-            actions_real = self.actor_network(inputs_norm_tensor)
-            actor_loss = -self.critic_network1(inputs_norm_tensor, actions_real).mean()
-            actor_loss += self.args.action_l2 * (actions_real / self.env_params['action_max']).pow(2).mean()
-
-            self.actor_optim.zero_grad()
-            actor_loss.backward()
-            sync_grads(self.actor_network)
-            self.actor_optim.step()
-
-            self._soft_update_target_network(self.actor_target_network, self.actor_network)
-            self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
-            self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
-
-        # todo: log the training metrics
-        if self.global_step % 100 == 0:
-            if self.rank == 0:
-                if actor_loss is not None:
-                    self.writer.add_scalar("training/actor_loss", actor_loss, self.global_step)
-                self.writer.add_scalar("training/critic_loss1", critic_loss1, self.global_step)
-                self.writer.add_scalar("training/critic_loss2", critic_loss2, self.global_step)
-                if self.args.track:
-                    if actor_loss is not None:
-                        wandb.log({"training/actor_loss": actor_loss}, step=self.global_step)
-                    wandb.log({"training/critic_loss1": critic_loss1, "training/critic_loss2": critic_loss2},
-                              step=self.global_step)
-
-    # do the evaluation
-    def _eval_agent(self):
+    def evaluate_agent(self):
         total_success_rate = []
-        # todo: for len and reward - Jay
         total_ep_len = []
         total_reward = []
-        for _ in range(self.args.n_test_rollouts):
-            observation, _ = self.env.reset()  # returns a tuple in gymnasium
-            obs = observation['observation']
-            g = observation['desired_goal']
 
-            # todo: additional variables for logging - Jay
-            current_ep_len = 0
-            current_ep_reward = 0
-            done_flag = False  # flag to indicate if the episode is already done
+        for env_name, env, o_norm, g_norm in zip(self.env_names, self.envs, self.o_norms_list, self.g_norms_list):
+            env_success_rate = []
+            env_ep_len = []
+            env_reward = []
 
-            for t in range(self.env_params['max_timesteps']):
-                with torch.no_grad():
-                    input_tensor = self._preproc_inputs(obs, g)
-                    pi = self.actor_network(input_tensor)
-                    # convert the actions
-                    actions = pi.detach().cpu().numpy().squeeze()
-                observation_new, reward, term, trunc, info = self.env.step(actions)  # todo: added reward and done - Jay
+            # get the environment index
+            env_idx = self.get_env_idx(env_name)
 
-                # todo: log the reward and episode length - Jay
-                if not done_flag:
-                    current_ep_len += 1
-                    current_ep_reward += reward
+            for _ in range(self.args.n_test_rollouts):
+                observation, _ = env.reset()
+                obs = observation['observation']
+                g = observation['desired_goal']
+                current_ep_len = 0
+                current_ep_reward = 0
+                done_flag = False
 
-                    # we only want to log the reward and episode length if the episode is not done
-                    if term or trunc or t + 1 == self.env_params['max_timesteps']:
-                        done_flag = True
-                        total_success_rate.append(info['is_success'])
+                for t in range(self.env_params_list[env_idx]['max_timesteps']):
+                    with torch.no_grad():
+                        input_tensor = self._preproc_inputs(obs, g, env_idx)
+                        pi = self.actor_network(input_tensor)
+                        actions = pi.detach().cpu().numpy().squeeze()
+                    observation_new, reward, term, trunc, info = env.step(actions)
 
-                obs = observation_new['observation']
-                g = observation_new['desired_goal']
+                    if not done_flag:
+                        current_ep_len += 1
+                        current_ep_reward += reward
 
-            # todo: append the successes rate, episode length and reward to the lists - Jay
-            total_ep_len.append(current_ep_len)
-            total_reward.append(current_ep_reward)
+                        if term or trunc or t + 1 == self.env_params_list[env_idx]['max_timesteps']:
+                            done_flag = True
+                            env_success_rate.append(info['is_success'])
 
-        # Calculate local mean success rate, episode length, and reward
-        total_success_rate = np.array(total_success_rate)
+                    obs = observation_new['observation']
+                    g = observation_new['desired_goal']
+
+                env_ep_len.append(current_ep_len)
+                env_reward.append(current_ep_reward)
+
+            total_success_rate.append(np.mean(env_success_rate))
+            total_ep_len.append(np.mean(env_ep_len))
+            total_reward.append(np.mean(env_reward))
+
         local_success_rate = np.mean(total_success_rate)
-        total_ep_len = np.array(total_ep_len)
-        local_ep_len = np.mean(total_ep_len)
-        total_reward = np.array(total_reward)
-        local_reward = np.mean(total_reward)
-
-        # Aggregate results across all MPI processes
-        # here MPI.COMM_WORLD.allreduce will sum up the success rate from all the processes
         global_success_rate = MPI.COMM_WORLD.allreduce(local_success_rate, op=MPI.SUM)
+        local_ep_len = np.mean(total_ep_len)
         global_ep_len = MPI.COMM_WORLD.allreduce(local_ep_len, op=MPI.SUM)
+        local_reward = np.mean(total_reward)
         global_reward = MPI.COMM_WORLD.allreduce(local_reward, op=MPI.SUM)
 
-        # Average the aggregated results by the number of processes
-        num_processes = MPI.COMM_WORLD.Get_size()
-        success_rate = global_success_rate / num_processes
-        ep_len = global_ep_len / num_processes
-        reward = global_reward / num_processes
+        success_rate = global_success_rate / MPI.COMM_WORLD.Get_size()
+        ep_len = global_ep_len / MPI.COMM_WORLD.Get_size()
+        reward = global_reward / MPI.COMM_WORLD.Get_size()
 
         return success_rate, reward, ep_len
 
-    def count_trainable_parameters(self, model):
+    def save_model(self, env_name: str):
         """
-        Count the number of trainable parameters in the model
-        :param model:
+        This lets us save the model for each environment when training multiple environments
+
+        :param env_name:
         :return:
         """
-        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+        env_idx = self.get_env_idx(env_name)
+        torch.save({
+            'env_name': env_name,
+            'o_norm_mean': self.o_norms_list[env_idx].mean,
+            'o_norm_std': self.o_norms_list[env_idx].std,
+            'g_norm_mean': self.g_norms_list[env_idx].mean,
+            'g_norm_std': self.g_norms_list[env_idx].std,
+        }, f"{self.model_path}/norm_{env_name}.pt")
+
+        torch.save({
+            'env_name': env_name,
+            'actor_state_dict': self.actor_network.state_dict(),
+            'critic_1_state_dict': self.critic_network1.state_dict(),
+            'critic_2_state_dict': self.critic_network2.state_dict(),
+            'actor_target_state_dict': self.actor_target_network.state_dict(),
+            'critic_1_target_state_dict': self.critic_target_network1.state_dict(),
+            'critic_2_target_state_dict': self.critic_target_network2.state_dict(),
+        }, f"{self.model_path}/model_{env_name}.pt")
+
+    def get_env_idx(self, env_name: str):
+        """
+        get the index of the environment in the list of environments
+
+        :param env_name:
+        :return:
+        """
+        return self.env_names.index(env_name)
+
+    def get_env_name(self, env_idx: int):
+        """
+        get the name of the environment from the index
+
+        :param env_idx:
+        :return:
+        """
+        return self.env_names[env_idx]
+
