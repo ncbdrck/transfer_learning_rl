@@ -70,7 +70,7 @@ def get_args_vanilla():
     parser.add_argument('--policy-delay', type=int, default=2,
                         help='the delay in updating the policy')
 
-    # todo: additional args for MAML TD3 - Jay
+    # Additional args for multi-task learning
     parser.add_argument('--multiple_tasks', type=bool, default=True,
                         help='if toggled, this each MPI process will train on multiple different task')
     parser.add_argument('--multi_num_tasks', type=int, default=3, help='the number of tasks to sample for training')
