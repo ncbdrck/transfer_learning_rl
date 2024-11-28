@@ -676,14 +676,11 @@ class TD3_Agent:
             inputs_tensor = inputs_tensor.cuda()
         return inputs_tensor
 
-    # update the normalizer
-    def _update_normalizer(self, episode_batch):
+    def _update_normalizer(self, episode_batch, env_idx):
         mb_obs, mb_ag, mb_g, mb_actions = episode_batch
         mb_obs_next = mb_obs[:, 1:, :]
         mb_ag_next = mb_ag[:, 1:, :]
-        # get the number of normalization transitions
         num_transitions = mb_actions.shape[1]
-        # create the new buffer to store them
         buffer_temp = {'obs': mb_obs,
                        'ag': mb_ag,
                        'g': mb_g,
@@ -691,16 +688,17 @@ class TD3_Agent:
                        'obs_next': mb_obs_next,
                        'ag_next': mb_ag_next,
                        }
-        transitions = self.her_module.sample_her_transitions(buffer_temp, num_transitions)
+        her_module = self.her_modules[env_idx]
+        transitions = her_module.sample_her_transitions(buffer_temp, num_transitions)
         obs, g = transitions['obs'], transitions['g']
-        # preprocess the obs and g
+        # pre-process the obs and g
         transitions['obs'], transitions['g'] = self._preproc_og(obs, g)
         # update
-        self.o_norm.update(transitions['obs'])
-        self.g_norm.update(transitions['g'])
+        self.o_norms_list[env_idx].update(transitions['obs'])
+        self.g_norms_list[env_idx].update(transitions['g'])
         # recompute the stats
-        self.o_norm.recompute_stats()
-        self.g_norm.recompute_stats()
+        self.o_norms_list[env_idx].recompute_stats()
+        self.g_norms_list[env_idx].recompute_stats()
 
     def _preproc_og(self, o, g):
         o = np.clip(o, -self.args.clip_obs, self.args.clip_obs)
