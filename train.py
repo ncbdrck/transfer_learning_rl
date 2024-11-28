@@ -3,7 +3,7 @@ import gymnasium as gym
 import os
 from configs.arguments import get_args_vanilla
 from mpi4py import MPI
-from agent.td3 import td3_agent
+from agent.td3 import TD3_Agent
 import random
 import torch
 
@@ -53,7 +53,7 @@ def launch(args):
         # torch.backends.cudnn.benchmark = False
 
     # create the multi_td3_agent to interact with the environments
-    multi_td3_trainer = td3_agent(args, envs, env_params, env_names, seed)
+    multi_td3_trainer = TD3_Agent(args, envs, env_params, env_names, seed)
     multi_td3_trainer.learn()
 
 if __name__ == '__main__':
