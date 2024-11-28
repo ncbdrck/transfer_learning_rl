@@ -200,7 +200,10 @@ class TD3_Agent:
         # save the main model
         if self.rank == 0 and self.args.save_model:
 
-            print("\033[92m" + f"Saving the model at {self.model_path_multi}" + "\033[0m")
+            # save the model
+            model_save_path = os.path.join(self.model_path_multi, 'model.pt')
+
+            print("\033[92m" + f"Saving the model at {model_save_path}" + "\033[0m")
             torch.save({
                 'actor_state_dict': self.actor_network.state_dict(),
                 'critic_1_state_dict': self.critic_network1.state_dict(),
@@ -208,7 +211,7 @@ class TD3_Agent:
                 'actor_target_state_dict': self.actor_target_network.state_dict(),
                 'critic_1_target_state_dict': self.critic_target_network1.state_dict(),
                 'critic_2_target_state_dict': self.critic_target_network2.state_dict(),
-            }, self.model_path_multi)
+            }, model_save_path)
 
     def sample_tasks(self):
         """
@@ -309,15 +312,17 @@ class TD3_Agent:
             sync_grads(self.critic_network2)
             self.critic_optim2.step()
 
+            # soft update the target networks
             if self.update_counter % self.args.policy_delay == 0:
                 self._soft_update_target_network(self.actor_target_network, self.actor_network)
                 self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
                 self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
 
         # soft update the target networks
-        self._soft_update_target_network(self.actor_target_network, self.actor_network)
-        self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
-        self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
+        if self.global_step % self.args.policy_delay == 0:
+            self._soft_update_target_network(self.actor_target_network, self.actor_network)
+            self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
+            self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
 
     def evaluation_and_logging_cycle(self, cycle, epoch):
         """
@@ -328,7 +333,7 @@ class TD3_Agent:
         :return:
         """
 
-        success_rate, reward, ep_len = self.evaluate_agent()
+        success_rate, reward, ep_len, success_rate_per_env, reward_per_env, ep_len_per_env = self.evaluate_agent()
         if self.rank == 0:
             print(f'[{datetime.now()}] Epoch: {epoch+1}, Cycle : {cycle + 1}, eval success rate: {success_rate:.3f}')
             self.writer.add_scalar("Cycle/eval_success_rate", success_rate, self.global_step)
@@ -338,6 +343,17 @@ class TD3_Agent:
                 wandb.log({"Cycle/eval_success_rate": success_rate}, step=self.global_step)
                 wandb.log({"Cycle/eval_reward": reward}, step=self.global_step)
                 wandb.log({"Cycle/eval_ep_len": ep_len}, step=self.global_step)
+
+            # print and log for each environment
+            for env_name in self.env_names:
+                print(f'[{datetime.now()}] Epoch: {epoch+1}, Cycle : {cycle + 1}, eval success rate for {env_name}: {success_rate_per_env[env_name]:.3f}')
+                self.writer.add_scalar(f"Cycle/eval_success_rate_{env_name}", success_rate_per_env[env_name], self.global_step)
+                self.writer.add_scalar(f"Cycle/eval_reward_{env_name}", reward_per_env[env_name], self.global_step)
+                self.writer.add_scalar(f"Cycle/eval_ep_len_{env_name}", ep_len_per_env[env_name], self.global_step)
+                if self.args.track:
+                    wandb.log({f"Cycle/eval_success_rate_{env_name}": success_rate_per_env[env_name]}, step=self.global_step)
+                    wandb.log({f"Cycle/eval_reward_{env_name}": reward_per_env[env_name]}, step=self.global_step)
+                    wandb.log({f"Cycle/eval_ep_len_{env_name}": ep_len_per_env[env_name]}, step=self.global_step)
 
     def _soft_update_target_network(self, target, source):
         """
@@ -634,11 +650,17 @@ class TD3_Agent:
     def evaluate_agent(self):
         """
         Evaluate the agent
-        :return: mean_success_rate, mean_reward, mean_ep_len
+        :return: mean_success_rate, mean_reward, mean_ep_len, mean_success_rate_per_env, mean_reward_per_env,
+        mean_ep_len_per_env
         """
         total_success_rate = []
         total_ep_len = []
         total_reward = []
+
+        # for each environment
+        total_success_rate_per_env = {env_name: np.float32(0) for env_name in self.env_names}
+        total_ep_len_per_env = {env_name: np.float32(0) for env_name in self.env_names}
+        total_reward_per_env = {env_name: np.float32(0) for env_name in self.env_names}
 
         for env_name, env, o_norm, g_norm in zip(self.env_names, self.envs, self.o_norms_list, self.g_norms_list):
             env_success_rate = []
@@ -681,6 +703,12 @@ class TD3_Agent:
             total_ep_len.append(np.mean(env_ep_len))
             total_reward.append(np.mean(env_reward))
 
+            # store the results for each environment
+            total_success_rate_per_env[env_name] = np.mean(env_success_rate)
+            total_ep_len_per_env[env_name] = np.mean(env_ep_len)
+            total_reward_per_env[env_name] = np.mean(env_reward)
+
+        # for all the environments
         local_success_rate = np.mean(total_success_rate)
         global_success_rate = MPI.COMM_WORLD.allreduce(local_success_rate, op=MPI.SUM)
         local_ep_len = np.mean(total_ep_len)
@@ -692,7 +720,24 @@ class TD3_Agent:
         mean_ep_len = global_ep_len / MPI.COMM_WORLD.Get_size()
         mean_reward = global_reward / MPI.COMM_WORLD.Get_size()
 
-        return mean_success_rate, mean_reward, mean_ep_len
+        # to save each environment's results
+        mean_success_rate_per_env = {env_name: np.float32(0) for env_name in self.env_names}
+        mean_ep_len_per_env = {env_name: np.float32(0) for env_name in self.env_names}
+        mean_reward_per_env = {env_name: np.float32(0) for env_name in self.env_names}
+        for env_name in self.env_names:
+            local_success_rate_env = total_success_rate_per_env[env_name]
+            global_success_rate_env = MPI.COMM_WORLD.allreduce(local_success_rate_env, op=MPI.SUM)
+            local_reward_env = total_reward_per_env[env_name]
+            global_reward_env = MPI.COMM_WORLD.allreduce(local_reward_env, op=MPI.SUM)
+            local_ep_len_env = total_ep_len_per_env[env_name]
+            global_ep_len_env = MPI.COMM_WORLD.allreduce(local_ep_len_env, op=MPI.SUM)
+
+            mean_success_rate_per_env[env_name] = global_success_rate_env / MPI.COMM_WORLD.Get_size()
+            mean_ep_len_per_env[env_name] = global_ep_len_env / MPI.COMM_WORLD.Get_size()
+            mean_reward_per_env[env_name] = global_reward_env / MPI.COMM_WORLD.Get_size()
+
+        return (mean_success_rate, mean_reward, mean_ep_len, mean_success_rate_per_env,
+                mean_reward_per_env, mean_ep_len_per_env)
 
     def save_model(self, env_name: str):
         """
