@@ -479,7 +479,7 @@ class TD3_Agent:
                 ep_reward += r
 
                 # check if the episode is done
-                if term or trunc or t + 1 == self.env_params_list[env_idx]['max_timesteps'] and not ep_done:
+                if (term or trunc or t + 1 == self.env_params_list[env_idx]['max_timesteps']) and not ep_done:
                     ep_done = True
 
                     # log the episode
@@ -632,6 +632,10 @@ class TD3_Agent:
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     def evaluate_agent(self):
+        """
+        Evaluate the agent
+        :return: mean_success_rate, mean_reward, mean_ep_len
+        """
         total_success_rate = []
         total_ep_len = []
         total_reward = []
@@ -684,11 +688,11 @@ class TD3_Agent:
         local_reward = np.mean(total_reward)
         global_reward = MPI.COMM_WORLD.allreduce(local_reward, op=MPI.SUM)
 
-        success_rate = global_success_rate / MPI.COMM_WORLD.Get_size()
-        ep_len = global_ep_len / MPI.COMM_WORLD.Get_size()
-        reward = global_reward / MPI.COMM_WORLD.Get_size()
+        mean_success_rate  = global_success_rate / MPI.COMM_WORLD.Get_size()
+        mean_ep_len = global_ep_len / MPI.COMM_WORLD.Get_size()
+        mean_reward = global_reward / MPI.COMM_WORLD.Get_size()
 
-        return success_rate, reward, ep_len
+        return mean_success_rate, mean_reward, mean_ep_len
 
     def save_model(self, env_name: str):
         """
