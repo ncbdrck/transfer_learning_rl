@@ -329,7 +329,7 @@ class TD3_Agent:
         """
 
         success_rate, reward, ep_len = self.evaluate_agent()
-        if MPI.COMM_WORLD.Get_rank() == 0:
+        if self.rank == 0:
             print(f'[{datetime.now()}] Epoch: {epoch+1}, Cycle : {cycle + 1}, eval success rate: {success_rate:.3f}')
             self.writer.add_scalar("Cycle/eval_success_rate", success_rate, self.global_step)
             self.writer.add_scalar("Cycle/eval_reward", reward, self.global_step)
@@ -697,24 +697,25 @@ class TD3_Agent:
         :param env_name:
         :return:
         """
-        env_idx = self.get_env_idx(env_name)
-        torch.save({
-            'env_name': env_name,
-            'o_norm_mean': self.o_norms_list[env_idx].mean,
-            'o_norm_std': self.o_norms_list[env_idx].std,
-            'g_norm_mean': self.g_norms_list[env_idx].mean,
-            'g_norm_std': self.g_norms_list[env_idx].std,
-        }, f"{self.model_path}/norm_{env_name}.pt")
+        if self.rank == 0:
+            env_idx = self.get_env_idx(env_name)
+            torch.save({
+                'env_name': env_name,
+                'o_norm_mean': self.o_norms_list[env_idx].mean,
+                'o_norm_std': self.o_norms_list[env_idx].std,
+                'g_norm_mean': self.g_norms_list[env_idx].mean,
+                'g_norm_std': self.g_norms_list[env_idx].std,
+            }, f"{self.model_path}/norm_{env_name}.pt")
 
-        torch.save({
-            'env_name': env_name,
-            'actor_state_dict': self.actor_network.state_dict(),
-            'critic_1_state_dict': self.critic_network1.state_dict(),
-            'critic_2_state_dict': self.critic_network2.state_dict(),
-            'actor_target_state_dict': self.actor_target_network.state_dict(),
-            'critic_1_target_state_dict': self.critic_target_network1.state_dict(),
-            'critic_2_target_state_dict': self.critic_target_network2.state_dict(),
-        }, f"{self.model_path}/model_{env_name}.pt")
+            torch.save({
+                'env_name': env_name,
+                'actor_state_dict': self.actor_network.state_dict(),
+                'critic_1_state_dict': self.critic_network1.state_dict(),
+                'critic_2_state_dict': self.critic_network2.state_dict(),
+                'actor_target_state_dict': self.actor_target_network.state_dict(),
+                'critic_1_target_state_dict': self.critic_target_network1.state_dict(),
+                'critic_2_target_state_dict': self.critic_target_network2.state_dict(),
+            }, f"{self.model_path}/model_{env_name}.pt")
 
     def get_env_idx(self, env_name: str):
         """
