@@ -175,13 +175,13 @@ class TD3_Agent:
             # create the directory if it doesn't exist
             if not os.path.exists(self.model_path):
                 os.makedirs(self.model_path)
-        self.model_path_maml =  f"runs/{self.run_name}/{self.exp_name}"
+        self.model_path_multi =  f"runs/{self.run_name}/{self.exp_name}"
 
         # let's save all the configurations
         if self.rank == 0:
-            if not os.path.exists(self.model_path_maml):
-                os.makedirs(self.model_path_maml)
-            config_filename = os.path.join(self.model_path_maml, 'config.json')
+            if not os.path.exists(self.model_path_multi):
+                os.makedirs(self.model_path_multi)
+            config_filename = os.path.join(self.model_path_multi, 'config.json')
             with open(config_filename, 'w') as f:
                 json.dump(vars(args), f, indent=2)
 
@@ -200,7 +200,7 @@ class TD3_Agent:
         # save the main model
         if self.rank == 0 and self.args.save_model:
 
-            print("\033[92m" + f"Saving the model at {self.model_path_maml}" + "\033[0m")
+            print("\033[92m" + f"Saving the model at {self.model_path_multi}" + "\033[0m")
             torch.save({
                 'actor_state_dict': self.actor_network.state_dict(),
                 'critic_1_state_dict': self.critic_network1.state_dict(),
@@ -208,7 +208,7 @@ class TD3_Agent:
                 'actor_target_state_dict': self.actor_target_network.state_dict(),
                 'critic_1_target_state_dict': self.critic_target_network1.state_dict(),
                 'critic_2_target_state_dict': self.critic_target_network2.state_dict(),
-            }, self.model_path_maml)
+            }, self.model_path_multi)
 
     def sample_tasks(self):
         """
@@ -259,7 +259,7 @@ class TD3_Agent:
                 if self.args.debug:
                     print(f"env:{env_idx} actor_loss: {type(actor_loss)},critic_loss1: {type(critic_loss1)}, "
                           f"critic_loss2: {type(critic_loss2)}")
-                    # print meta_actor_loss so we can check if it has gradient tracking
+                    # print actor_loss so we can check if it has gradient tracking
                     print(f"env:{env_idx} actor_loss: {actor_loss.requires_grad}")
                     print(f"env:{env_idx} critic_loss1: {critic_loss1.requires_grad}")
                     print(f"env:{env_idx} critic_loss2: {critic_loss2.requires_grad}")
