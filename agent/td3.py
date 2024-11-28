@@ -440,7 +440,7 @@ class TD3_Agent:
             ep_reward = 0
             ep_done = False
 
-            # loop over the max number of timesteps
+            # loop over the environment
             for t in range(self.env_params_list[env_idx]['max_timesteps']):
                 with torch.no_grad():
                     input_tensor = self._preproc_inputs(obs, g, env_idx)
@@ -465,7 +465,7 @@ class TD3_Agent:
                 ep_reward += r
 
                 # check if the episode is done
-                if term or trunc or t + 1 == self.env_params['max_timesteps'] and not ep_done:
+                if term or trunc or t + 1 == self.env_params_list[env_idx]['max_timesteps'] and not ep_done:
                     ep_done = True
 
                     # log the episode
@@ -486,7 +486,7 @@ class TD3_Agent:
         mb_actions = np.array(mb_actions)
 
         # store the episodes
-        self.inner_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
+        self.buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
         self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
         # train the task-specific networks
@@ -581,13 +581,86 @@ class TD3_Agent:
         self.meta_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
         self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
+    def _log_episode(self, env_idx, episode_length, episode_reward, is_success):
+        """
+        Log the episode statistics
+
+        :param env_idx: Index of the environment
+        :param episode_length: Length of the episode
+        :param episode_reward: Reward of the episode
+        :param is_success: Whether the episode was successful or not
+        :return: None
+        """
+
+        # get env name
+        env_name = self.env_names[env_idx]
+
+        # append the episode length and calculate the mean
+        self.ep_len_history_env[env_idx].append(episode_length)
+        if len(self.ep_len_history_env[env_idx]) >= self.log_interval:
+            mean_ep_len = np.mean(self.ep_len_history_env[env_idx][-self.log_interval:])
+            self.ep_len_history_env[env_idx] = self.ep_len_history_env[env_idx][-self.log_interval:]
+        else:
+            mean_ep_len = np.mean(self.ep_len_history_env[env_idx])
+        # log the mean episode length
+        if self.rank == 0:
+            self.writer.add_scalar(f"{env_name}/mean_ep_length", mean_ep_len, self.global_step_env[env_idx])
+            if self.args.track:
+                wandb.log({f"{env_name}/mean_ep_length": mean_ep_len}, step=self.global_step_env[env_idx])
+
+        # append the episode reward and calculate the mean
+        self.reward_history_env[env_idx].append(episode_reward)
+        if len(self.reward_history_env[env_idx]) >= self.log_interval:
+            mean_reward = np.mean(self.reward_history_env[env_idx][-self.log_interval:])
+            self.reward_history_env[env_idx] = self.reward_history_env[env_idx][-self.log_interval:]
+        else:
+            mean_reward = np.mean(self.reward_history_env[env_idx])
+        # log the mean episode reward
+        if self.rank == 0:
+            self.writer.add_scalar(f"{env_name}/mean_reward", mean_reward, self.global_step_env[env_idx])
+            if self.args.track:
+                wandb.log({f"{env_name}/mean_reward": mean_reward}, step=self.global_step_env[env_idx])
+
+        # append the success rate and calculate the mean
+        self.success_history_env[env_idx].append(is_success)
+        if len(self.success_history_env[env_idx]) >= self.log_interval:
+            mean_success_rate = np.mean(self.success_history_env[env_idx][-self.log_interval:])
+            self.success_history_env[env_idx] = self.success_history_env[env_idx][-self.log_interval:]
+        else:
+            mean_success_rate = np.mean(self.success_history_env[env_idx])
+        # log the mean success rate
+        if self.rank == 0:
+            self.writer.add_scalar(f"{env_name}/mean_success_rate", mean_success_rate,
+                                   self.global_step_env[env_idx])
+            if self.args.track:
+                wandb.log({f"{env_name}/mean_success_rate": mean_success_rate}, step=self.global_step_env[env_idx])
+
+
+    def _select_actions(self, pi, env_idx):
+        action = pi.cpu().numpy().squeeze()
+        # add the gaussian
+        action += self.args.noise_eps * self.env_params_list[env_idx]['action_max'] * np.random.randn(*action.shape)
+        action = np.clip(action, -self.env_params_list[env_idx]['action_max'],
+                         self.env_params_list[env_idx]['action_max'])
+        # random actions...
+        random_actions = np.random.uniform(low=-self.env_params_list[env_idx]['action_max'],
+                                           high=self.env_params_list[env_idx]['action_max'],
+                                           size=self.env_params_list[env_idx]['action'])
+        # choose if you use the random actions
+        action += np.random.binomial(1, self.args.random_eps, 1)[0] * (random_actions - action)
+        # clip the actions again in case of the random component
+        action = np.clip(action, -self.env_params_list[env_idx]['action_max'],
+                         self.env_params_list[env_idx]['action_max'])
+        return action
+
+
     def _preproc_inputs(self, obs, g, env_idx):
         """
         Preprocess the inputs for the networks
 
-        :param obs:
-        :param g:
-        :param env_idx:
+        :param obs: observation
+        :param g: goal
+        :param env_idx: Index of the environment
         :return: inputs_tensor for the networks
         """
 
@@ -602,19 +675,6 @@ class TD3_Agent:
         if self.args.cuda:
             inputs_tensor = inputs_tensor.cuda()
         return inputs_tensor
-
-    # this function will choose action for the agent and do the exploration
-    def _select_actions(self, pi):
-        action = pi.cpu().numpy().squeeze()
-        # add the gaussian
-        action += self.args.noise_eps * self.env_params['action_max'] * np.random.randn(*action.shape)
-        action = np.clip(action, -self.env_params['action_max'], self.env_params['action_max'])
-        # random actions...
-        random_actions = np.random.uniform(low=-self.env_params['action_max'], high=self.env_params['action_max'],
-                                           size=self.env_params['action'])
-        # choose if you use the random actions
-        action += np.random.binomial(1, self.args.random_eps, 1)[0] * (random_actions - action)
-        return action
 
     # update the normalizer
     def _update_normalizer(self, episode_batch):
