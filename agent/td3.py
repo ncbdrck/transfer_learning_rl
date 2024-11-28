@@ -425,6 +425,10 @@ class TD3_Agent:
         return actor_loss, critic_loss1, critic_loss2
 
     def inner_loop(self, env_idx):
+        """
+        Sample trajectories and store them in the replay buffer
+        :param env_idx: Index of the environment
+        """
 
         # retrieve the task-specific variables
         env = self.envs[env_idx]
@@ -487,98 +491,6 @@ class TD3_Agent:
 
         # store the episodes
         self.buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
-        self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
-
-        # train the task-specific networks
-        for _ in range(self.args.n_batches):
-            inner_actor_loss, inner_critic_loss1, inner_critic_loss2 = self.compute_loss(env_idx)
-
-            # delayed update for the actor network
-            if self.global_step_env[env_idx] % self.args.policy_delay == 0:
-                self.inner_actor_optims[env_idx].zero_grad()
-                inner_actor_loss.backward()
-                self.inner_actor_optims[env_idx].step()
-
-            # update the critic_network 1
-            self.inner_critic_optims1[env_idx].zero_grad()
-            inner_critic_loss1.backward()
-            self.inner_critic_optims1[env_idx].step()
-
-            # update the critic_network 2
-            self.inner_critic_optims2[env_idx].zero_grad()
-            inner_critic_loss2.backward()
-            self.inner_critic_optims2[env_idx].step()
-
-            # delayed update for the actor network
-            if self.global_step_env[env_idx] % self.args.policy_delay == 0:
-                # we can update only when delayed update is done
-                self._soft_update_target_network(self.inner_actor_target_networks[env_idx],
-                                                 self.inner_actor_networks[env_idx])
-                self._soft_update_target_network(self.inner_critic_target_networks1[env_idx],
-                                                 self.inner_critic_networks1[env_idx])
-                self._soft_update_target_network(self.inner_critic_target_networks2[env_idx],
-                                                 self.inner_critic_networks2[env_idx])
-
-        # soft update the target networks
-        self._soft_update_target_network(self.inner_actor_target_networks[env_idx], self.inner_actor_networks[env_idx])
-        self._soft_update_target_network(self.inner_critic_target_networks1[env_idx],
-                                         self.inner_critic_networks1[env_idx])
-        self._soft_update_target_network(self.inner_critic_target_networks2[env_idx],
-                                         self.inner_critic_networks2[env_idx])
-
-        # Sample new trajectories using updated task-specific networks
-        mb_obs, mb_ag, mb_g, mb_actions = [], [], [], []
-        for _ in range(self.args.maml_K):
-            ep_obs, ep_ag, ep_g, ep_actions = [], [], [], []
-            observation, _ = env.reset(seed=self._seed)
-            obs = observation['observation']
-            ag = observation['achieved_goal']
-            g = observation['desired_goal']
-            ep_reward = 0
-            ep_done = False
-
-            # todo: we can use the commented line below to use the max_timesteps for each environment
-            # for t in range(self.env_params_list[env_idx]['max_timesteps']):
-            for t in range(self.env_params['max_timesteps']):
-                with torch.no_grad():
-                    input_tensor = self._preproc_inputs(obs, g, env_idx)
-                    pi = self.inner_actor_networks[env_idx](input_tensor)
-                    action = self._select_actions(pi, env_idx)
-                observation_new, r, term, trunc, info = env.step(action)
-                obs_new = observation_new['observation']
-                ag_new = observation_new['achieved_goal']
-
-                ep_obs.append(obs.copy())
-                ep_ag.append(ag.copy())
-                ep_g.append(g.copy())
-                ep_actions.append(action.copy())
-                obs = obs_new
-                ag = ag_new
-                ep_reward += r
-                self.global_step_env[env_idx] += 1
-
-                if term or trunc or t + 1 == self.env_params['max_timesteps'] and not ep_done:
-                    ep_done = True
-
-                    # log the episode
-                    if self.rank == 0:
-                        self._log_episode(env_idx, t + 1, ep_reward, info.get('is_success', 0))
-
-            ep_obs.append(obs.copy())
-            ep_ag.append(ag.copy())
-            mb_obs.append(ep_obs)
-            mb_ag.append(ep_ag)
-            mb_g.append(ep_g)
-            mb_actions.append(ep_actions)
-
-        mb_obs = np.array(mb_obs)
-        mb_ag = np.array(mb_ag)
-        mb_g = np.array(mb_g)
-        mb_actions = np.array(mb_actions)
-
-        # clear and store the episodes in the meta replay buffer
-        self.meta_buffers[env_idx].clear_buffer()
-        self.meta_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
         self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
     def _log_episode(self, env_idx, episode_length, episode_reward, is_success):
