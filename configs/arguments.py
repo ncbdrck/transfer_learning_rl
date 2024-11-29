@@ -10,8 +10,8 @@ def get_args_vanilla():
     parser = argparse.ArgumentParser()
     # the environment setting
     parser.add_argument('--exp-name', type=str, default='vanilla_multi_task', help='the experiment name')
-    parser.add_argument('--n-epochs', type=int, default=10, help='the number of epochs to train the agent')
-    parser.add_argument('--n-cycles', type=int, default=10, help='the times to collect samples per epoch')
+    parser.add_argument('--n-epochs', type=int, default=100, help='the number of epochs to train the agent')
+    parser.add_argument('--n-cycles', type=int, default=100, help='the times to collect samples per epoch')
     parser.add_argument('--n-batches', type=int, default=40, help='the times to update the network')
     parser.add_argument('--save-interval', type=int, default=5, help='the interval that save the trajectory')
     parser.add_argument('--seed', type=int, default=123, help='random seed')
@@ -34,7 +34,7 @@ def get_args_vanilla():
     parser.add_argument('--clip-range', type=float, default=5, help='the clip range')
     parser.add_argument('--demo-length', type=int, default=20, help='the demo length')
     parser.add_argument('--cuda', action='store_true', help='if use gpu do the acceleration')
-    parser.add_argument('--num-rollouts-per-mpi', type=int, default=2, help='the rollouts per mpi')  # we did not use this
+    parser.add_argument('--num-rollouts-per-mpi', type=int, default=10, help='the rollouts per mpi')  # we did not use this
 
     # Additional args for logging and saving the model
     parser.add_argument('--track', type=bool, default=False,
@@ -76,7 +76,8 @@ def get_args_vanilla():
     parser.add_argument('--multi_num_tasks', type=int, default=3, help='the number of tasks to sample for training')
     parser.add_argument('--num-rollouts-per-env', type=int, default=2,
                         help='the number of episodes to sample for each iteration')
-
+    parser.add_argument('--transformer_agent', type=bool, default=False,
+                        help='if toggled, this experiment will use the transformer agent')
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
     parser.add_argument('--tune_all_maml_hyperparameters', type=bool, default=True,
