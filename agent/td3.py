@@ -8,6 +8,7 @@ from utils.mpi_utils.normalizer import normalizer
 from utils.replay_buffer import replay_buffer
 from utils.her_modules.her import her_sampler
 from policy.models import actor, critic
+from policy.transformer_based import ActorTransformer, CriticTransformer
 
 # additional imports
 from torch.utils.tensorboard import SummaryWriter
@@ -69,13 +70,24 @@ class TD3_Agent:
         self._seed = seed
 
         # create the network
-        self.actor_network = actor(self.env_params)
-        self.critic_network1 = critic(self.env_params)
-        self.critic_network2 = critic(self.env_params)
-        # build up the target network
-        self.actor_target_network = actor(self.env_params)
-        self.critic_target_network1 = critic(self.env_params)
-        self.critic_target_network2 = critic(self.env_params)
+        if self.args.transformer_agent:
+            # create the transformer policy network
+            self.actor_network = ActorTransformer(self.env_params)
+            self.critic_network1 = CriticTransformer(self.env_params)
+            self.critic_network2 = CriticTransformer(self.env_params)
+            # build up the target network
+            self.actor_target_network = ActorTransformer(self.env_params)
+            self.critic_target_network1 = CriticTransformer(self.env_params)
+            self.critic_target_network2 = CriticTransformer(self.env_params)
+        else:
+            # create the policy network
+            self.actor_network = actor(self.env_params)
+            self.critic_network1 = critic(self.env_params)
+            self.critic_network2 = critic(self.env_params)
+            # build up the target network
+            self.actor_target_network = actor(self.env_params)
+            self.critic_target_network1 = critic(self.env_params)
+            self.critic_target_network2 = critic(self.env_params)
 
         # Load the model if specified
         global_step = 0  # initialize the global step to 0
