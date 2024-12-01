@@ -7,8 +7,7 @@ from utils.mpi_utils.mpi_utils import sync_networks, sync_grads
 from utils.mpi_utils.normalizer import normalizer
 from utils.replay_buffer import replay_buffer
 from utils.her_modules.her import her_sampler
-from policy.models import actor, critic
-from policy.transformer_based import ActorTransformer, CriticTransformer
+from policy.models_v1 import actor, critic
 
 # additional imports
 from torch.utils.tensorboard import SummaryWriter
@@ -18,15 +17,22 @@ import pickle
 import json
 
 """
-TD3 with HER (MPI-version) for multi-task learning
+TD3 with HER (MPI-version) for few-shot learning
+- based on the td3 multi-task learning implementation
+- MAML is used for implementing the few-shot learning
+- using the updated policy network where we need to supply max action to the forward function
 """
 
 
 class TD3_Agent:
     def __init__(self, args, envs, env_params_list, env_names, seed):
 
+        # Meta-parameters for MAML
+        self.alpha = args.maml_alpha
+        self.beta = args.maml_beta
+
         self.log_interval = args.log_interval # for logging the training metrics
-        self.learning_starts = args.learning_starts  # learning starts after these many steps
+        self.learning_starts = args.learning_starts  # todo: learning starts after these many steps
 
         # Individual environment logging as well as for dynamic gradient updates
         self.success_history_env = [[] for _ in range(len(envs))]
@@ -69,25 +75,14 @@ class TD3_Agent:
         self.env_names = env_names
         self._seed = seed
 
-        # create the network
-        if self.args.transformer_agent:
-            # create the transformer policy network
-            self.actor_network = ActorTransformer(self.env_params)
-            self.critic_network1 = CriticTransformer(self.env_params)
-            self.critic_network2 = CriticTransformer(self.env_params)
-            # build up the target network
-            self.actor_target_network = ActorTransformer(self.env_params)
-            self.critic_target_network1 = CriticTransformer(self.env_params)
-            self.critic_target_network2 = CriticTransformer(self.env_params)
-        else:
-            # create the policy network
-            self.actor_network = actor(self.env_params)
-            self.critic_network1 = critic(self.env_params)
-            self.critic_network2 = critic(self.env_params)
-            # build up the target network
-            self.actor_target_network = actor(self.env_params)
-            self.critic_target_network1 = critic(self.env_params)
-            self.critic_target_network2 = critic(self.env_params)
+        # create the policy network
+        self.actor_network = actor(self.env_params)
+        self.critic_network1 = critic(self.env_params)
+        self.critic_network2 = critic(self.env_params)
+        # build up the target network
+        self.actor_target_network = actor(self.env_params)
+        self.critic_target_network1 = critic(self.env_params)
+        self.critic_target_network2 = critic(self.env_params)
 
         # Load the model if specified
         global_step = 0  # initialize the global step to 0
@@ -160,17 +155,69 @@ class TD3_Agent:
             self.critic_target_network1.cuda()
             self.critic_target_network2.cuda()
 
-        # create the optimizer
-        self.actor_optim = torch.optim.Adam(self.actor_network.parameters(), lr=self.args.lr_actor)
-        self.critic_optim1 = torch.optim.Adam(self.critic_network1.parameters(), lr=self.args.lr_critic)
-        self.critic_optim2 = torch.optim.Adam(self.critic_network2.parameters(), lr=self.args.lr_critic)
+        # create the optimizer for outer loop
+        self.actor_optim = torch.optim.Adam(self.actor_network.parameters(), lr=self.beta)
+        self.critic_optim1 = torch.optim.Adam(self.critic_network1.parameters(), lr=self.beta)
+        self.critic_optim2 = torch.optim.Adam(self.critic_network2.parameters(), lr=self.beta)
 
-        # her sampler
+        # her sampler for replay buffers - only need to create once
         self.her_modules = [her_sampler(self.args.replay_strategy, self.args.replay_k, env.compute_reward) for env in
                             envs]
 
-        # create the replay buffer
-        self.buffers = [replay_buffer(env_params, self.args.buffer_size, her_module.sample_her_transitions)
+        # create the replay buffer for each environment - for outer loop
+        self.meta_buffers = [replay_buffer(env_params, self.args.buffer_size, her_module.sample_her_transitions)
+                              for env_params, her_module in zip(env_params_list, self.her_modules)]
+
+        # create actor and critic networks for each environment - for inner loop
+        self.inner_actor_networks = [actor(env_params) for env_params in env_params_list]
+        self.inner_critic_networks1 = [critic(env_params) for env_params in env_params_list]
+        self.inner_critic_networks2 = [critic(env_params) for env_params in env_params_list]
+        self.inner_actor_target_networks = [actor(env_params) for env_params in env_params_list]
+        self.inner_critic_target_networks1 = [critic(env_params) for env_params in env_params_list]
+        self.inner_critic_target_networks2 = [critic(env_params) for env_params in env_params_list]
+
+        # initialize the inner networks and sync them across CPUs
+        for inner_actor, inner_actor_target in zip(self.inner_actor_networks, self.inner_actor_target_networks):
+            inner_actor.load_state_dict(self.actor_network.state_dict())
+            inner_actor_target.load_state_dict(self.actor_target_network.state_dict())
+
+        # copy critic parameters
+        for inner_critic1, inner_critic2, inner_critic_target1, inner_critic_target2 in zip(self.inner_critic_networks1,
+                                                                                            self.inner_critic_networks2,
+                                                                                            self.inner_critic_target_networks1,
+                                                                                            self.inner_critic_target_networks2):
+
+            inner_critic1.load_state_dict(self.critic_network1.state_dict())
+            inner_critic_target1.load_state_dict(self.critic_target_network1.state_dict())
+            inner_critic2.load_state_dict(self.critic_network2.state_dict())
+            inner_critic_target2.load_state_dict(self.critic_target_network2.state_dict())
+
+        # Use GPU if available, send the inner networks to the GPU
+        if self.args.cuda:
+            for (inner_actor, inner_critic1, inner_critic2, inner_actor_target, inner_critic_target1,
+                 inner_critic_target2) in zip(self.inner_actor_networks,
+                                              self.inner_critic_networks1,
+                                              self.inner_critic_networks2,
+                                              self.inner_actor_target_networks,
+                                              self.inner_critic_target_networks1,
+                                              self.inner_critic_target_networks2):
+                inner_actor.cuda()
+                inner_critic1.cuda()
+                inner_critic2.cuda()
+                inner_actor_target.cuda()
+                inner_critic_target1.cuda()
+                inner_critic_target2.cuda()
+
+        # create optimizers for each environment
+        self.inner_actor_optims = [torch.optim.Adam(actor_network.parameters(), lr=self.alpha) for actor_network in
+                                   self.inner_actor_networks]
+        self.inner_critic_optims1 = [torch.optim.Adam(critic_network.parameters(), lr=self.alpha) for critic_network in
+                                    self.inner_critic_networks1]
+        self.inner_critic_optims2 = [torch.optim.Adam(critic_network.parameters(), lr=self.alpha) for critic_network in
+                                    self.inner_critic_networks2]
+
+        # create the replay buffer for each environment - for inner loop
+        self.inner_buffers = [replay_buffer(env_params, self.args.buffer_size, her_module.sample_her_transitions)
                               for env_params, her_module in zip(env_params_list, self.her_modules)]
 
         # create the normalizer
@@ -238,9 +285,11 @@ class TD3_Agent:
             else:
                 # if the number of tasks is greater than the number of environments, sample all the environments (default)
                 return list(range(len(self.envs)))
-        else:
+        elif len(self.envs) > 1:
             # sample a single task
             return [np.random.randint(0, len(self.envs))]
+        else:
+            return [0]  # if there is only one environment
 
     def outer_loop(self, tasks):
         """
