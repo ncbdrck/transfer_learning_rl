@@ -285,11 +285,9 @@ class TD3_Agent:
             else:
                 # if the number of tasks is greater than the number of environments, sample all the environments (default)
                 return list(range(len(self.envs)))
-        elif len(self.envs) > 1:
+        else:
             # sample a single task
             return [np.random.randint(0, len(self.envs))]
-        else:
-            return [0]  # if there is only one environment
 
     def outer_loop(self, tasks):
         """
