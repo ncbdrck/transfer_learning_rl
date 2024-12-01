@@ -81,12 +81,6 @@ def get_args_vanilla():
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
 
-    # todo: for optuna - Jay
-    parser.add_argument('--use_optuna', action='store_true', help='if toggled, this experiment will use Optuna to tune hyperparameters')
-    parser.add_argument('--optuna_study_name', type=str, default='maml_td3_study', help='save the success rate to this file')
-    parser.add_argument('--optuna_trial_number', type=int, default=50, help='the number of trials for Optuna')
-    parser.add_argument('--optuna_save_dir', type=str, default='optuna_saved_models/', help='the path to save the models')
-
     args = parser.parse_args()
 
     return args
