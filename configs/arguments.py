@@ -80,9 +80,6 @@ def get_args_vanilla():
                         help='if toggled, this experiment will use the transformer agent')
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
-    parser.add_argument('--tune_all_maml_hyperparameters', type=bool, default=True,
-                        help='if toggled, all hyperparameters for MAML will be tuned')
-    parser.add_argument('--meta_args_lr', type=float, default=0.01, help='the learning rate of the meta-args')
 
     # todo: for optuna - Jay
     parser.add_argument('--use_optuna', action='store_true', help='if toggled, this experiment will use Optuna to tune hyperparameters')
