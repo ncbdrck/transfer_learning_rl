@@ -278,14 +278,14 @@ class Few_Shot_TD3_Agent:
 
     def sample_tasks(self):
         """
-        Sample a list of tasks to loop over. This is used for multitask learning
+        Sample a list of tasks to loop over. This is used for meta learning
         :return: return a list of tasks
         """
         # sample multiple tasks
         if self.args.multiple_tasks:
             # sample the specific number of tasks if the number of tasks is less than the number of environments
-            if self.args.multi_num_tasks < len(self.envs):
-                return np.random.randint(0, len(self.envs), size=self.args.multi_num_tasks).tolist()
+            if self.args.maml_num_tasks < len(self.envs):
+                return np.random.randint(0, len(self.envs), size=self.args.maml_num_tasks).tolist()
             else:
                 # if the number of tasks is greater than the number of environments, sample all the environments (default)
                 return list(range(len(self.envs)))
@@ -312,7 +312,7 @@ class Few_Shot_TD3_Agent:
             total_critic_loss2 = torch.tensor(0.0, dtype=torch.float32)
 
             # increase the update counter
-            self.update_counter += 1
+            self.meta_update_counter += 1
 
             if self.args.cuda:
                 total_actor_loss = total_actor_loss.cuda()
@@ -522,7 +522,7 @@ class Few_Shot_TD3_Agent:
         # retrieve the task-specific variables
         env = self.envs[env_idx]
 
-        # networks
+        # retrieve the task-specific networks
         actor_network = self.inner_actor_networks[env_idx]
         critic_network1 = self.inner_critic_networks1[env_idx]
         critic_network2 = self.inner_critic_networks2[env_idx]
@@ -530,16 +530,29 @@ class Few_Shot_TD3_Agent:
         critic_target_network1 = self.inner_critic_target_networks1[env_idx]
         critic_target_network2 = self.inner_critic_target_networks2[env_idx]
 
-        # copy the networks
-        # todo: try without copying the networks
-        actor_network.load_state_dict(self.actor_network.state_dict())
-        critic_network1.load_state_dict(self.critic_network1.state_dict())
-        critic_network2.load_state_dict(self.critic_network2.state_dict())
-        # actor_target_network.load_state_dict(self.actor_target_network.state_dict())
-        # critic_target_network1.load_state_dict(self.critic_target_network1.state_dict())
-        # critic_target_network2.load_state_dict(self.critic_target_network2.state_dict())
+        # copy the networks only after learning starts
+        if self.global_step > self.learning_starts:
+            # copy the networks
+            # todo: try without copying the networks
+            actor_network.load_state_dict(self.actor_network.state_dict())
+            critic_network1.load_state_dict(self.critic_network1.state_dict())
+            critic_network2.load_state_dict(self.critic_network2.state_dict())
+            # actor_target_network.load_state_dict(self.actor_target_network.state_dict())
+            # critic_target_network1.load_state_dict(self.critic_target_network1.state_dict())
+            # critic_target_network2.load_state_dict(self.critic_target_network2.state_dict())
 
-        # Sample trajectories
+        # sample trajectories using the actor network
+        mb_obs, mb_ag, mb_g, mb_actions = self.sample_trajectories(env, actor_network, env_idx)
+
+        # store the episodes
+        self.inner_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
+        self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
+
+    def sample_trajectories(self, env, actor_network, env_idx):
+        """
+        Sample trajectories using the actor network
+        """
+
         mb_obs, mb_ag, mb_g, mb_actions = [], [], [], []
         for _ in range(self.args.maml_K):
             ep_obs, ep_ag, ep_g, ep_actions = [], [], [], []
@@ -555,11 +568,16 @@ class Few_Shot_TD3_Agent:
             for t in range(self.env_params_list[env_idx]['max_timesteps']):
                 with torch.no_grad():
                     input_tensor = self._preproc_inputs(obs, g, env_idx)
-                    pi = self.actor_network(input_tensor, max_action)
+                    pi = actor_network(input_tensor, max_action)
                     action = self._select_actions(pi, env_idx)
+
+                # take a step in the environment
                 observation_new, r, term, trunc, info = env.step(action)
+
+                # get the new observation
                 obs_new = observation_new['observation']
                 ag_new = observation_new['achieved_goal']
+                g_new = observation_new['desired_goal']
 
                 # store the episode
                 ep_obs.append(obs.copy())
@@ -570,6 +588,7 @@ class Few_Shot_TD3_Agent:
                 # update the variables
                 obs = obs_new
                 ag = ag_new
+                g = g_new
 
                 # for logging
                 self.global_step_env[env_idx] += 1
@@ -583,8 +602,8 @@ class Few_Shot_TD3_Agent:
                     if self.rank == 0:
                         self._log_episode(env_idx, t + 1, ep_reward, info.get('is_success', 0))
 
-            ep_obs.append(obs.copy())
-            ep_ag.append(ag.copy())
+            ep_obs.append(obs.copy())  # need to append the last observation
+            ep_ag.append(ag.copy())  # need to append the last achieved goal
             mb_obs.append(ep_obs)
             mb_ag.append(ep_ag)
             mb_g.append(ep_g)
@@ -596,9 +615,7 @@ class Few_Shot_TD3_Agent:
         mb_g = np.array(mb_g)
         mb_actions = np.array(mb_actions)
 
-        # store the episodes
-        self.inner_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
-        self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
+        return mb_obs, mb_ag, mb_g, mb_actions
 
     def _log_episode(self, env_idx, episode_length, episode_reward, is_success):
         """
