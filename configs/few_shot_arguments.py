@@ -2,14 +2,14 @@ import argparse
 
 """
 Here are the param for the training
-- Multi-Task leaning with TD3
+- Few shot learning with TD3
 """
 
 
-def get_args_vanilla():
+def get_args():
     parser = argparse.ArgumentParser()
     # the environment setting
-    parser.add_argument('--exp-name', type=str, default='vanilla_multi_task', help='the experiment name')
+    parser.add_argument('--exp-name', type=str, default='few_shot_td3', help='the experiment name')
     parser.add_argument('--n-epochs', type=int, default=100, help='the number of epochs to train the agent')
     parser.add_argument('--n-cycles', type=int, default=100, help='the times to collect samples per epoch')
     parser.add_argument('--n-batches', type=int, default=40, help='the times to update the network')
@@ -34,7 +34,7 @@ def get_args_vanilla():
     parser.add_argument('--clip-range', type=float, default=5, help='the clip range')
     parser.add_argument('--demo-length', type=int, default=20, help='the demo length')
     parser.add_argument('--cuda', action='store_true', help='if use gpu do the acceleration')
-    parser.add_argument('--num-rollouts-per-mpi', type=int, default=10, help='the rollouts per mpi')  # we did not use this
+    parser.add_argument('--num-rollouts-per-mpi', type=int, default=10, help='the rollouts per mpi')
 
     # Additional args for logging and saving the model
     parser.add_argument('--track', type=bool, default=False,
@@ -70,25 +70,20 @@ def get_args_vanilla():
     parser.add_argument('--policy-delay', type=int, default=2,
                         help='the delay in updating the policy')
 
-    # Additional args for multi-task learning
-    parser.add_argument('--multiple_tasks', type=bool, default=True,
+    # Additional args for MAML TD3 - Jay
+    parser.add_argument('--maml_alpha', type=float, default=0.001, help='the learning rate of the inner loop of MAML')  # typically this should be smaller than the learning rate of the outer loop
+    parser.add_argument('--maml_beta', type=float, default=0.01, help='the learning rate of the outer loop of MAML')
+    parser.add_argument('--maml_K', type=int, default=10, help='the number of episodes to sample for each iteration')
+    parser.add_argument('--maml_num_tasks', type=int, default=1, help='the number of tasks to sample for training')
+    parser.add_argument('--multiple_tasks', type=bool, default=False,
                         help='if toggled, this each MPI process will train on multiple different task')
-    parser.add_argument('--multi_num_tasks', type=int, default=3, help='the number of tasks to sample for training')
-    parser.add_argument('--num-rollouts-per-env', type=int, default=2,
-                        help='the number of episodes to sample for each iteration')
-    parser.add_argument('--transformer_agent', type=bool, default=False,
-                        help='if toggled, this experiment will use the transformer agent')
+    parser.add_argument('--n-meta-batches', type=int, default=80,
+                        help='the times to update the main model in the outer loop')
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
     parser.add_argument('--tune_all_maml_hyperparameters', type=bool, default=True,
                         help='if toggled, all hyperparameters for MAML will be tuned')
     parser.add_argument('--meta_args_lr', type=float, default=0.01, help='the learning rate of the meta-args')
-
-    # todo: for optuna - Jay
-    parser.add_argument('--use_optuna', action='store_true', help='if toggled, this experiment will use Optuna to tune hyperparameters')
-    parser.add_argument('--optuna_study_name', type=str, default='maml_td3_study', help='save the success rate to this file')
-    parser.add_argument('--optuna_trial_number', type=int, default=50, help='the number of trials for Optuna')
-    parser.add_argument('--optuna_save_dir', type=str, default='optuna_saved_models/', help='the path to save the models')
 
     args = parser.parse_args()
 

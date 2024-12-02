@@ -299,7 +299,7 @@ class TD3_Agent:
         self.global_step += 1
 
         for env_idx in tasks:
-            # sample the trajectories
+            # sample the trajectories using the inner loop
             self.inner_loop(env_idx)
 
         for _ in range(self.args.n_batches):
@@ -511,16 +511,33 @@ class TD3_Agent:
 
     def inner_loop(self, env_idx):
         """
-        Sample trajectories and store them in the replay buffer
+        Sample trajectories and store them in the replay buffer. update the networks using the inner loop
         :param env_idx: Index of the environment
         """
 
         # retrieve the task-specific variables
         env = self.envs[env_idx]
 
+        # networks
+        actor_network = self.inner_actor_networks[env_idx]
+        critic_network1 = self.inner_critic_networks1[env_idx]
+        critic_network2 = self.inner_critic_networks2[env_idx]
+        actor_target_network = self.inner_actor_target_networks[env_idx]
+        critic_target_network1 = self.inner_critic_target_networks1[env_idx]
+        critic_target_network2 = self.inner_critic_target_networks2[env_idx]
+
+        # copy the networks
+        # todo: try without copying the networks
+        actor_network.load_state_dict(self.actor_network.state_dict())
+        critic_network1.load_state_dict(self.critic_network1.state_dict())
+        critic_network2.load_state_dict(self.critic_network2.state_dict())
+        # actor_target_network.load_state_dict(self.actor_target_network.state_dict())
+        # critic_target_network1.load_state_dict(self.critic_target_network1.state_dict())
+        # critic_target_network2.load_state_dict(self.critic_target_network2.state_dict())
+
         # Sample trajectories
         mb_obs, mb_ag, mb_g, mb_actions = [], [], [], []
-        for _ in range(self.args.num_rollouts_per_env):
+        for _ in range(self.args.maml_K):
             ep_obs, ep_ag, ep_g, ep_actions = [], [], [], []
             observation, _ = env.reset(seed=self._seed)
             obs = observation['observation']
@@ -528,12 +545,13 @@ class TD3_Agent:
             g = observation['desired_goal']
             ep_reward = 0
             ep_done = False
+            max_action = self.env_params_list[env_idx]['action_max']
 
             # loop over the environment
             for t in range(self.env_params_list[env_idx]['max_timesteps']):
                 with torch.no_grad():
                     input_tensor = self._preproc_inputs(obs, g, env_idx)
-                    pi = self.actor_network(input_tensor)
+                    pi = self.actor_network(input_tensor, max_action)
                     action = self._select_actions(pi, env_idx)
                 observation_new, r, term, trunc, info = env.step(action)
                 obs_new = observation_new['observation']
@@ -575,7 +593,7 @@ class TD3_Agent:
         mb_actions = np.array(mb_actions)
 
         # store the episodes
-        self.buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
+        self.inner_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
         self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
     def _log_episode(self, env_idx, episode_length, episode_reward, is_success):
