@@ -9,10 +9,10 @@ Here are the param for the training
 def get_args():
     parser = argparse.ArgumentParser()
     # the environment setting
-    parser.add_argument('--exp-name', type=str, default='few_shot_td3', help='the experiment name')
+    parser.add_argument('--exp-name', type=str, default='meta_td3', help='the experiment name')
     parser.add_argument('--n-epochs', type=int, default=100, help='the number of epochs to train the agent')
     parser.add_argument('--n-cycles', type=int, default=100, help='the times to collect samples per epoch')
-    parser.add_argument('--n-batches', type=int, default=40, help='the times to update the network')
+    parser.add_argument('--n-batches', type=int, default=40, help='the times to update the inner networks')
     parser.add_argument('--save-interval', type=int, default=5, help='the interval that save the trajectory')
     parser.add_argument('--seed', type=int, default=123, help='random seed')
     parser.add_argument('--num-workers', type=int, default=1, help='the number of cpus to collect samples')
@@ -47,8 +47,6 @@ def get_args():
                         help='if toggled, this experiment will save the model after training in the runs/{run_name}')
     parser.add_argument('--save-replay-buffer', type=bool, default=True,
                         help='if toggled, this experiment will save the replay buffer after training in the runs/{run_name}')
-    parser.add_argument('--learning_starts', type=int, default=1000,
-                        help='the number of steps before learning starts')
     parser.add_argument('--load-model', type=bool, default=False,
                         help='if toggled, this experiment will load the model from the runs/{run_name}/{model_name}')
     parser.add_argument('--load-run-name', type=str, default=None,
@@ -69,6 +67,8 @@ def get_args():
                         help='the noise clip value added to the target policy during critic update')
     parser.add_argument('--policy-delay', type=int, default=2,
                         help='the delay in updating the policy')
+    parser.add_argument('--learning_starts', type=int, default=3,
+                        help='the number of steps before learning starts')
 
     # Additional args for MAML TD3 - Jay
     parser.add_argument('--maml_alpha', type=float, default=0.001, help='the learning rate of the inner loop of MAML')  # typically this should be smaller than the learning rate of the outer loop

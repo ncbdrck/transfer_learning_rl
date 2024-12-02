@@ -548,6 +548,10 @@ class Few_Shot_TD3_Agent:
         self.inner_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
         self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
+        # train the task-specific networks
+        for _ in range(self.args.n_batches):
+
+
     def sample_trajectories(self, env, actor_network, env_idx):
         """
         Sample trajectories using the actor network
