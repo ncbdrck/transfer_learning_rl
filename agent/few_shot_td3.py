@@ -24,7 +24,7 @@ TD3 with HER (MPI-version) for few-shot learning
 """
 
 
-class TD3_Agent:
+class Few_Shot_TD3_Agent:
     def __init__(self, args, envs, env_params_list, env_names, seed):
 
         # Meta-parameters for MAML
@@ -40,7 +40,8 @@ class TD3_Agent:
         self.reward_history_env = [[] for _ in range(len(envs))]
         self.global_step_env = [0 for _ in range(len(envs))]
         self.global_step = 0  # for outer loop
-        self.update_counter = 0  # for inner loop
+        self.meta_update_counter = 0  # for outer loop
+        self.inner_update_counter = 0  # for inner loop
 
         # Variables for logging and saving the model
         self.exp_name: str = os.path.basename(__file__)[: -len(".py")]  # Name of the experiment
@@ -106,6 +107,8 @@ class TD3_Agent:
                 # load the global step
                 if self.args.continue_training_log:
                     global_step = checkpoint['global_step']
+
+                # todo: we may need to load the replay buffer as well (for later)
 
             else:
                 raise FileNotFoundError(f"Model not found at {load_path}")
@@ -228,19 +231,20 @@ class TD3_Agent:
 
         # Create directory to store the model
         if self.rank == 0:
+            # using this to save each individual model for each environment
             if not os.path.exists(self.args.save_dir):
                 os.mkdir(self.args.save_dir)
             self.model_path = os.path.join(self.args.save_dir, self.args.exp_name, self.run_name)
             # create the directory if it doesn't exist
             if not os.path.exists(self.model_path):
                 os.makedirs(self.model_path)
-        self.model_path_multi =  f"runs/{self.run_name}/{self.exp_name}"
+        self.model_path_meta =  f"runs/{self.run_name}/{self.exp_name}"
 
         # let's save all the configurations
         if self.rank == 0:
-            if not os.path.exists(self.model_path_multi):
-                os.makedirs(self.model_path_multi)
-            config_filename = os.path.join(self.model_path_multi, 'config.json')
+            if not os.path.exists(self.model_path_meta):
+                os.makedirs(self.model_path_meta)
+            config_filename = os.path.join(self.model_path_meta, 'config.json')
             with open(config_filename, 'w') as f:
                 json.dump(vars(args), f, indent=2)
 
@@ -260,7 +264,7 @@ class TD3_Agent:
         if self.rank == 0 and self.args.save_model:
 
             # save the model
-            model_save_path = os.path.join(self.model_path_multi, 'model.pt')
+            model_save_path = os.path.join(self.model_path_meta, 'model.pt')
 
             print("\033[92m" + f"Saving the model at {model_save_path}" + "\033[0m")
             torch.save({
