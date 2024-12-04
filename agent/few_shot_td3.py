@@ -470,20 +470,26 @@ class Few_Shot_TD3_Agent:
         with torch.no_grad():
             noise = (torch.randn_like(actions_tensor) * self.args.policy_noise).clamp(-self.args.noise_clip,
                                                                                       self.args.noise_clip)
+            max_action_env = self.env_params_list[env_idx]['action_max']
+
             if meta:
-                actions_next = (self.actor_target_network(inputs_next_norm_tensor) + noise).clamp(
+
+                actions_next = (self.actor_target_network(inputs_next_norm_tensor, max_action_env) + noise).clamp(
                     -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
-                q_target1 = self.critic_target_network1(inputs_next_norm_tensor, actions_next)
-                q_target2 = self.critic_target_network2(inputs_next_norm_tensor, actions_next)
+                q_target1 = self.critic_target_network1(inputs_next_norm_tensor, actions_next, max_action_env)
+                q_target2 = self.critic_target_network2(inputs_next_norm_tensor, actions_next, max_action_env)
                 q_target = torch.min(q_target1, q_target2)
                 target_q_value = r_tensor + self.args.gamma * q_target
                 clip_return = 1 / (1 - self.args.gamma)
                 target_q_value = torch.clamp(target_q_value, -clip_return, 0)
             else:
-                actions_next = (self.inner_actor_target_networks[env_idx](inputs_next_norm_tensor) + noise).clamp(
+                actions_next = (self.inner_actor_target_networks[env_idx](inputs_next_norm_tensor,
+                                                                          max_action_env) + noise).clamp(
                     -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
-                q_target1 = self.inner_critic_target_networks1[env_idx](inputs_next_norm_tensor, actions_next)
-                q_target2 = self.inner_critic_target_networks2[env_idx](inputs_next_norm_tensor, actions_next)
+                q_target1 = self.inner_critic_target_networks1[env_idx](inputs_next_norm_tensor, actions_next,
+                                                                        max_action_env)
+                q_target2 = self.inner_critic_target_networks2[env_idx](inputs_next_norm_tensor, actions_next,
+                                                                        max_action_env)
                 q_target = torch.min(q_target1, q_target2)
                 target_q_value = r_tensor + self.args.gamma * q_target
                 clip_return = 1 / (1 - self.args.gamma)
@@ -491,13 +497,13 @@ class Few_Shot_TD3_Agent:
 
         # Compute current Q-values and the critic loss
         if meta:
-            real_q_value1 = self.critic_network1(inputs_norm_tensor, actions_tensor)
-            real_q_value2 = self.critic_network2(inputs_norm_tensor, actions_tensor)
+            real_q_value1 = self.critic_network1(inputs_norm_tensor, actions_tensor, max_action_env)
+            real_q_value2 = self.critic_network2(inputs_norm_tensor, actions_tensor, max_action_env)
             critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
             critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
         else:
-            real_q_value1 = self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_tensor)
-            real_q_value2 = self.inner_critic_networks2[env_idx](inputs_norm_tensor, actions_tensor)
+            real_q_value1 = self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_tensor, max_action_env)
+            real_q_value2 = self.inner_critic_networks2[env_idx](inputs_norm_tensor, actions_tensor, max_action_env)
             critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
             critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
 
@@ -508,8 +514,8 @@ class Few_Shot_TD3_Agent:
         # Compute actor loss
         if meta:
             if self.meta_update_counter % self.args.policy_delay == 0:
-                actions_real = self.actor_network(inputs_norm_tensor)
-                actor_loss = -self.critic_network1(inputs_norm_tensor, actions_real).mean()
+                actions_real = self.actor_network(inputs_norm_tensor, max_action_env)
+                actor_loss = -self.critic_network1(inputs_norm_tensor, actions_real, max_action_env).mean()
                 # Add action regularization to keep the actions in check
                 actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
                 2).mean()
@@ -531,8 +537,8 @@ class Few_Shot_TD3_Agent:
                     wandb.log({f"meta_env_{env_idx}/critic_loss2": critic_loss2}, step=self.meta_update_counter)
         else:
             if self.inner_update_counter % self.args.policy_delay == 0:
-                actions_real = self.inner_actor_networks[env_idx](inputs_norm_tensor)
-                actor_loss = -self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_real).mean()
+                actions_real = self.inner_actor_networks[env_idx](inputs_norm_tensor, max_action_env)
+                actor_loss = -self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_real, max_action_env).mean()
                 # Add action regularization to keep the actions in check
                 actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
                     2).mean()
@@ -866,11 +872,12 @@ class Few_Shot_TD3_Agent:
                 current_ep_len = 0
                 current_ep_reward = 0
                 done_flag = False
+                max_action = self.env_params_list[env_idx]['action_max']
 
                 for t in range(self.env_params_list[env_idx]['max_timesteps']):
                     with torch.no_grad():
                         input_tensor = self._preproc_inputs(obs, g, env_idx)
-                        pi = self.actor_network(input_tensor)
+                        pi = self.actor_network(input_tensor, max_action)
                         actions = pi.detach().cpu().numpy().squeeze()
                     observation_new, reward, term, trunc, info = env.step(actions)
 
