@@ -22,6 +22,7 @@ TD3 with HER (MPI-version) for few-shot learning
 - MAML is used for implementing the few-shot learning
 - using the updated policy network where we need to supply max action to the forward function
 - using the "learnings_starts" parameter to start learning after certain steps
+- do not clear the meta buffer after each meta update
 """
 
 
@@ -299,86 +300,90 @@ class Few_Shot_TD3_Agent:
             # sample the trajectories using the inner loop
             self.inner_loop(env_idx)
 
-        for _ in range(self.args.n_meta_batches):
-            total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
-            total_critic_loss1 = torch.tensor(0.0, dtype=torch.float32)
-            total_critic_loss2 = torch.tensor(0.0, dtype=torch.float32)
+        # start the learning after certain steps
+        if self.global_step > self.learning_starts:
 
-            # increase the update counter
-            self.meta_update_counter += 1
+            # update the networks using the meta gradients
+            for _ in range(self.args.n_meta_batches):
+                total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
+                total_critic_loss1 = torch.tensor(0.0, dtype=torch.float32)
+                total_critic_loss2 = torch.tensor(0.0, dtype=torch.float32)
 
-            if self.args.cuda:
-                total_actor_loss = total_actor_loss.cuda()
-                total_critic_loss1 = total_critic_loss1.cuda()
-                total_critic_loss2 = total_critic_loss2.cuda()
+                # increase the update counter
+                self.meta_update_counter += 1
 
-            # calculate the loss for each environment
-            for env_idx in tasks:
-                actor_loss, critic_loss1, critic_loss2= self.compute_loss(env_idx)
+                if self.args.cuda:
+                    total_actor_loss = total_actor_loss.cuda()
+                    total_critic_loss1 = total_critic_loss1.cuda()
+                    total_critic_loss2 = total_critic_loss2.cuda()
+
+                # calculate the loss for each environment
+                for env_idx in tasks:
+                    actor_loss, critic_loss1, critic_loss2= self.compute_loss(env_idx, meta=True)
+                    if self.args.debug:
+                        print(f"env:{env_idx} actor_loss: {type(actor_loss)},critic_loss1: {type(critic_loss1)}, "
+                              f"critic_loss2: {type(critic_loss2)}")
+                        # print actor_loss so we can check if it has gradient tracking
+                        print(f"env:{env_idx} actor_loss: {actor_loss.requires_grad}")
+                        print(f"env:{env_idx} critic_loss1: {critic_loss1.requires_grad}")
+                        print(f"env:{env_idx} critic_loss2: {critic_loss2.requires_grad}")
+
+                    # Accumulate losses
+                    total_actor_loss += actor_loss
+                    total_critic_loss1 += critic_loss1
+                    total_critic_loss2 += critic_loss2
+
+                # Average the losses across tasks
+                total_actor_loss /= len(tasks)
+                total_critic_loss1 /= len(tasks)
+                total_critic_loss2 /= len(tasks)
+
                 if self.args.debug:
-                    print(f"env:{env_idx} actor_loss: {type(actor_loss)},critic_loss1: {type(critic_loss1)}, "
-                          f"critic_loss2: {type(critic_loss2)}")
-                    # print actor_loss so we can check if it has gradient tracking
-                    print(f"env:{env_idx} actor_loss: {actor_loss.requires_grad}")
-                    print(f"env:{env_idx} critic_loss1: {critic_loss1.requires_grad}")
-                    print(f"env:{env_idx} critic_loss2: {critic_loss2.requires_grad}")
+                    print(f"update counter: {self.meta_update_counter}, total_critic_loss1: {total_critic_loss1}, "
+                          f"total_critic_loss2: {total_critic_loss2}, total_actor_loss: {total_actor_loss}")
 
-                # Accumulate losses
-                total_actor_loss += actor_loss
-                total_critic_loss1 += critic_loss1
-                total_critic_loss2 += critic_loss2
+                # log the losses for each updates
+                if self.rank == 0 and self.meta_update_counter % 10 == 0:
+                    if self.meta_update_counter % self.args.policy_delay == 0:
+                        self.writer.add_scalar("rollout/actor_loss", total_actor_loss, self.meta_update_counter)
+                    self.writer.add_scalar("rollout/critic_loss1", total_critic_loss1, self.meta_update_counter)
+                    self.writer.add_scalar("rollout/critic_loss2", total_critic_loss2, self.meta_update_counter)
+                    if self.args.track:
+                        if self.meta_update_counter % self.args.policy_delay == 0:
+                            wandb.log({"rollout/actor_loss": total_actor_loss}, step=self.meta_update_counter)
+                        wandb.log({"rollout/critic_loss1": total_critic_loss1}, step=self.meta_update_counter)
+                        wandb.log({"rollout/critic_loss2": total_critic_loss2}, step=self.meta_update_counter)
 
-            # Average the losses across tasks
-            total_actor_loss /= len(tasks)
-            total_critic_loss1 /= len(tasks)
-            total_critic_loss2 /= len(tasks)
+                if self.meta_update_counter % self.args.policy_delay == 0:
+                    # update the actor network
+                    self.actor_optim.zero_grad()
+                    total_actor_loss.backward()
+                    sync_grads(self.actor_network)
+                    self.actor_optim.step()
 
-            if self.args.debug:
-                print(f"update counter: {self.update_counter}, total_critic_loss1: {total_critic_loss1}, "
-                      f"total_critic_loss2: {total_critic_loss2}, total_actor_loss: {total_actor_loss}")
+                # update the critic_network1
+                self.critic_optim1.zero_grad()
+                total_critic_loss1.backward()
+                sync_grads(self.critic_network1)
+                self.critic_optim1.step()
 
-            # log the losses for each updates
-            if self.rank == 0 and self.update_counter % 10 == 0:
-                if self.update_counter % self.args.policy_delay == 0:
-                    self.writer.add_scalar("rollout/actor_loss", total_actor_loss, self.update_counter)
-                self.writer.add_scalar("rollout/critic_loss1", total_critic_loss1, self.update_counter)
-                self.writer.add_scalar("rollout/critic_loss2", total_critic_loss2, self.update_counter)
-                if self.args.track:
-                    if self.update_counter % self.args.policy_delay == 0:
-                        wandb.log({"rollout/actor_loss": total_actor_loss}, step=self.update_counter)
-                    wandb.log({"rollout/critic_loss1": total_critic_loss1}, step=self.update_counter)
-                    wandb.log({"rollout/critic_loss2": total_critic_loss2}, step=self.update_counter)
+                # update the critic_network2
+                self.critic_optim2.zero_grad()
+                total_critic_loss2.backward()
+                sync_grads(self.critic_network2)
+                self.critic_optim2.step()
 
-            if self.update_counter % self.args.policy_delay == 0:
-                # update the actor network
-                self.actor_optim.zero_grad()
-                total_actor_loss.backward()
-                sync_grads(self.actor_network)
-                self.actor_optim.step()
-
-            # update the critic_network1
-            self.critic_optim1.zero_grad()
-            total_critic_loss1.backward()
-            sync_grads(self.critic_network1)
-            self.critic_optim1.step()
-
-            # update the critic_network2
-            self.critic_optim2.zero_grad()
-            total_critic_loss2.backward()
-            sync_grads(self.critic_network2)
-            self.critic_optim2.step()
+                # soft update the target networks
+                if self.meta_update_counter % self.args.policy_delay == 0:
+                    self._soft_update_target_network(self.actor_target_network, self.actor_network)
+                    self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
+                    self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
 
             # soft update the target networks
-            if self.update_counter % self.args.policy_delay == 0:
+            if self.global_step % self.args.policy_delay == 0:
                 self._soft_update_target_network(self.actor_target_network, self.actor_network)
                 self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
                 self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
-
-        # soft update the target networks
-        if self.global_step % self.args.policy_delay == 0:
-            self._soft_update_target_network(self.actor_target_network, self.actor_network)
-            self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
-            self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
 
     def evaluation_and_logging_cycle(self, cycle, epoch):
         """
@@ -567,7 +572,7 @@ class Few_Shot_TD3_Agent:
         # copy the networks only after learning starts
         if self.global_step > self.learning_starts:
             # copy the networks
-            # todo: try without copying the networks
+            # todo: try without copying any networks
             actor_network.load_state_dict(self.actor_network.state_dict())
             critic_network1.load_state_dict(self.critic_network1.state_dict())
             critic_network2.load_state_dict(self.critic_network2.state_dict())
@@ -625,7 +630,7 @@ class Few_Shot_TD3_Agent:
         # sample new trajectories using the updated actor network
         mb_obs, mb_ag, mb_g, mb_actions = self.sample_trajectories(actor_network, env_idx)
 
-        # store the episodes in the meta replay buffer
+        # store the episodes in the meta-replay buffer
         # self.meta_buffers[env_idx].clear_buffer()
         self.meta_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
         self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
