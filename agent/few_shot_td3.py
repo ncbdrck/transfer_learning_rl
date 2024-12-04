@@ -21,6 +21,7 @@ TD3 with HER (MPI-version) for few-shot learning
 - based on the td3 multi-task learning implementation
 - MAML is used for implementing the few-shot learning
 - using the updated policy network where we need to supply max action to the forward function
+- using the "learnings_starts" parameter to start learning after certain steps
 """
 
 
@@ -44,8 +45,8 @@ class Few_Shot_TD3_Agent:
         self.inner_update_counter = 0  # for inner loop
 
         # Variables for logging and saving the model
-        self.exp_name: str = os.path.basename(__file__)[: -len(".py")]  # Name of the experiment
-        self.run_name = f"{args.exp_name}__{self.exp_name}__{args.seed}__{int(time.time())}"
+        self.file_name: str = os.path.basename(__file__)[: -len(".py")]  # Name of the experiment
+        self.run_name = f"{args.exp_name}__{self.file_name}__{args.seed}__{int(time.time())}"
         self.rank = MPI.COMM_WORLD.Get_rank()  # Get the MPI process rank for logging - the main process is rank 0
 
         # Initialize the Tensorboard Summary Writer and Weights and Biases
@@ -71,7 +72,7 @@ class Few_Shot_TD3_Agent:
 
         self.args = args
         self.envs = envs
-        self.env_params = env_params_list[0]  # assume all environments have the same action and observation spaces
+        self.env_params = env_params_list[0]  # assuming all environments have the same action and observation spaces
         self.env_params_list = env_params_list
         self.env_names = env_names
         self._seed = seed
@@ -223,22 +224,14 @@ class Few_Shot_TD3_Agent:
         self.inner_buffers = [replay_buffer(env_params, self.args.buffer_size, her_module.sample_her_transitions)
                               for env_params, her_module in zip(env_params_list, self.her_modules)]
 
-        # create the normalizer
+        # create the normalizer for each environment
         self.o_norms_list = [normalizer(size=env_params['obs'], default_clip_range=self.args.clip_range) for env_params
                              in env_params_list]
         self.g_norms_list = [normalizer(size=env_params['goal'], default_clip_range=self.args.clip_range) for env_params
                              in env_params_list]
 
-        # Create directory to store the model
-        if self.rank == 0:
-            # using this to save each individual model for each environment
-            if not os.path.exists(self.args.save_dir):
-                os.mkdir(self.args.save_dir)
-            self.model_path = os.path.join(self.args.save_dir, self.args.exp_name, self.run_name)
-            # create the directory if it doesn't exist
-            if not os.path.exists(self.model_path):
-                os.makedirs(self.model_path)
-        self.model_path_meta =  f"runs/{self.run_name}/{self.exp_name}"
+        # path to store the models and configurations
+        self.model_path_meta =  f"runs/{self.run_name}/{self.file_name}"
 
         # let's save all the configurations
         if self.rank == 0:
@@ -306,7 +299,7 @@ class Few_Shot_TD3_Agent:
             # sample the trajectories using the inner loop
             self.inner_loop(env_idx)
 
-        for _ in range(self.args.n_batches):
+        for _ in range(self.args.n_meta_batches):
             total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
             total_critic_loss1 = torch.tensor(0.0, dtype=torch.float32)
             total_critic_loss2 = torch.tensor(0.0, dtype=torch.float32)
@@ -428,15 +421,19 @@ class Few_Shot_TD3_Agent:
         for target_param, param in zip(target.parameters(), source.parameters()):
             target_param.data.copy_((1 - self.args.polyak) * param.data + self.args.polyak * target_param.data)
 
-    def compute_loss(self, env_idx):
+    def compute_loss(self, env_idx, meta=False):
         """
         Compute the actor and critic loss
         :param env_idx: Index of the environment
+        :param meta: To indicate if the loss is for meta updates
         :return: actor_loss, critic_loss1, critic_loss2
         """
 
         # Sample a batch of transitions
-        transitions = self.buffers[env_idx].sample(self.args.batch_size)
+        if meta:
+            transitions = self.meta_buffers[env_idx].sample(self.args.batch_size)
+        else:
+            transitions = self.inner_buffers[env_idx].sample(self.args.batch_size)
 
         # Pre-process the observation and goal
         o, o_next, g = transitions['obs'], transitions['obs_next'], transitions['g']
@@ -468,48 +465,88 @@ class Few_Shot_TD3_Agent:
         with torch.no_grad():
             noise = (torch.randn_like(actions_tensor) * self.args.policy_noise).clamp(-self.args.noise_clip,
                                                                                       self.args.noise_clip)
-            actions_next = (self.actor_target_network(inputs_next_norm_tensor) + noise).clamp(
-                -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
-            q_target1 = self.critic_target_network1(inputs_next_norm_tensor, actions_next)
-            q_target2 = self.critic_target_network2(inputs_next_norm_tensor, actions_next)
-            q_target = torch.min(q_target1, q_target2)
-            target_q_value = r_tensor + self.args.gamma * q_target
-            clip_return = 1 / (1 - self.args.gamma)
-            target_q_value = torch.clamp(target_q_value, -clip_return, 0)
+            if meta:
+                actions_next = (self.actor_target_network(inputs_next_norm_tensor) + noise).clamp(
+                    -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
+                q_target1 = self.critic_target_network1(inputs_next_norm_tensor, actions_next)
+                q_target2 = self.critic_target_network2(inputs_next_norm_tensor, actions_next)
+                q_target = torch.min(q_target1, q_target2)
+                target_q_value = r_tensor + self.args.gamma * q_target
+                clip_return = 1 / (1 - self.args.gamma)
+                target_q_value = torch.clamp(target_q_value, -clip_return, 0)
+            else:
+                actions_next = (self.inner_actor_target_networks[env_idx](inputs_next_norm_tensor) + noise).clamp(
+                    -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
+                q_target1 = self.inner_critic_target_networks1[env_idx](inputs_next_norm_tensor, actions_next)
+                q_target2 = self.inner_critic_target_networks2[env_idx](inputs_next_norm_tensor, actions_next)
+                q_target = torch.min(q_target1, q_target2)
+                target_q_value = r_tensor + self.args.gamma * q_target
+                clip_return = 1 / (1 - self.args.gamma)
+                target_q_value = torch.clamp(target_q_value, -clip_return, 0)
 
         # Compute current Q-values and the critic loss
-        real_q_value1 = self.critic_network1(inputs_norm_tensor, actions_tensor)
-        real_q_value2 = self.critic_network2(inputs_norm_tensor, actions_tensor)
-        critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
-        critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
+        if meta:
+            real_q_value1 = self.critic_network1(inputs_norm_tensor, actions_tensor)
+            real_q_value2 = self.critic_network2(inputs_norm_tensor, actions_tensor)
+            critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
+            critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
+        else:
+            real_q_value1 = self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_tensor)
+            real_q_value2 = self.inner_critic_networks2[env_idx](inputs_norm_tensor, actions_tensor)
+            critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
+            critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
 
         # Compute critic loss
         # critic_loss = torch.nn.functional.mse_loss(real_q_value, target_q_value)
         # critic_loss = (target_q_value - real_q_value).pow(2).mean()
 
         # Compute actor loss
-        if self.update_counter % self.args.policy_delay == 0:
-            actions_real = self.actor_network(inputs_norm_tensor)
-            actor_loss = -self.critic_network1(inputs_norm_tensor, actions_real).mean()
-            # Add action regularization to keep the actions in check
-            actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
-            2).mean()
-        else:
-            actor_loss = torch.tensor(0.0, dtype=torch.float32)
-            if self.args.cuda:
-                actor_loss = actor_loss.cuda()
+        if meta:
+            if self.meta_update_counter % self.args.policy_delay == 0:
+                actions_real = self.actor_network(inputs_norm_tensor)
+                actor_loss = -self.critic_network1(inputs_norm_tensor, actions_real).mean()
+                # Add action regularization to keep the actions in check
+                actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
+                2).mean()
+            else:
+                actor_loss = torch.tensor(0.0, dtype=torch.float32)
+                if self.args.cuda:
+                    actor_loss = actor_loss.cuda()
 
-        # log the losses for inner loop updates
-        if self.rank ==0:
-            if self.update_counter % self.args.policy_delay == 0:
-                self.writer.add_scalar(f"env_{env_idx}/actor_loss", actor_loss, self.update_counter)
-            self.writer.add_scalar(f"env_{env_idx}/critic_loss1", critic_loss1, self.update_counter)
-            self.writer.add_scalar(f"env_{env_idx}/critic_loss2", critic_loss2, self.update_counter)
-            if self.args.track:
-                if self.update_counter % self.args.policy_delay == 0:
-                    wandb.log({f"env_{env_idx}/actor_loss": actor_loss}, step=self.update_counter)
-                wandb.log({f"env_{env_idx}/critic_loss1": critic_loss1}, step=self.update_counter)
-                wandb.log({f"env_{env_idx}/critic_loss2": critic_loss2}, step=self.update_counter)
+            # log the losses for inner loop updates
+            if self.rank ==0:
+                if self.meta_update_counter % self.args.policy_delay == 0:
+                    self.writer.add_scalar(f"env_{env_idx}/actor_loss", actor_loss, self.meta_update_counter)
+                self.writer.add_scalar(f"env_{env_idx}/critic_loss1", critic_loss1, self.meta_update_counter)
+                self.writer.add_scalar(f"env_{env_idx}/critic_loss2", critic_loss2, self.meta_update_counter)
+                if self.args.track:
+                    if self.meta_update_counter % self.args.policy_delay == 0:
+                        wandb.log({f"env_{env_idx}/actor_loss": actor_loss}, step=self.meta_update_counter)
+                    wandb.log({f"env_{env_idx}/critic_loss1": critic_loss1}, step=self.meta_update_counter)
+                    wandb.log({f"env_{env_idx}/critic_loss2": critic_loss2}, step=self.meta_update_counter)
+        else:
+            if self.inner_update_counter % self.args.policy_delay == 0:
+                actions_real = self.inner_actor_networks[env_idx](inputs_norm_tensor)
+                actor_loss = -self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_real).mean()
+                # Add action regularization to keep the actions in check
+                actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
+                    2).mean()
+            else:
+                actor_loss = torch.tensor(0.0, dtype=torch.float32)
+                if self.args.cuda:
+                    actor_loss = actor_loss.cuda()
+
+            # log the losses for inner loop updates
+            if self.rank == 0:
+                if self.inner_update_counter % self.args.policy_delay == 0:
+                    self.writer.add_scalar(f"env_{env_idx}/actor_loss", actor_loss, self.inner_update_counter)
+                self.writer.add_scalar(f"env_{env_idx}/critic_loss1", critic_loss1, self.inner_update_counter)
+                self.writer.add_scalar(f"env_{env_idx}/critic_loss2", critic_loss2, self.inner_update_counter)
+                if self.args.track:
+                    if self.inner_update_counter % self.args.policy_delay == 0:
+                        wandb.log({f"env_{env_idx}/actor_loss": actor_loss}, step=self.inner_update_counter)
+                    wandb.log({f"env_{env_idx}/critic_loss1": critic_loss1}, step=self.inner_update_counter)
+                    wandb.log({f"env_{env_idx}/critic_loss2": critic_loss2}, step=self.inner_update_counter)
 
         return actor_loss, critic_loss1, critic_loss2
 
@@ -518,9 +555,6 @@ class Few_Shot_TD3_Agent:
         Sample trajectories and store them in the replay buffer. update the networks using the inner loop
         :param env_idx: Index of the environment
         """
-
-        # retrieve the task-specific variables
-        env = self.envs[env_idx]
 
         # retrieve the task-specific networks
         actor_network = self.inner_actor_networks[env_idx]
@@ -542,7 +576,7 @@ class Few_Shot_TD3_Agent:
             # critic_target_network2.load_state_dict(self.critic_target_network2.state_dict())
 
         # sample trajectories using the actor network
-        mb_obs, mb_ag, mb_g, mb_actions = self.sample_trajectories(env, actor_network, env_idx)
+        mb_obs, mb_ag, mb_g, mb_actions = self.sample_trajectories(actor_network, env_idx)
 
         # store the episodes
         self.inner_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
@@ -550,12 +584,16 @@ class Few_Shot_TD3_Agent:
 
         # train the task-specific networks
         for _ in range(self.args.n_batches):
+            inner_actor_loss, inner_critic_loss1, inner_critic_loss2 = self.compute_loss(env_idx)
 
 
-    def sample_trajectories(self, env, actor_network, env_idx):
+    def sample_trajectories(self, actor_network, env_idx):
         """
         Sample trajectories using the actor network
         """
+
+        # retrieve the task-specific variables
+        env = self.envs[env_idx]
 
         mb_obs, mb_ag, mb_g, mb_actions = [], [], [], []
         for _ in range(self.args.maml_K):
@@ -856,7 +894,7 @@ class Few_Shot_TD3_Agent:
                 'o_norm_std': self.o_norms_list[env_idx].std,
                 'g_norm_mean': self.g_norms_list[env_idx].mean,
                 'g_norm_std': self.g_norms_list[env_idx].std,
-            }, f"{self.model_path}/norm_{env_name}.pt")
+            }, f"{self.model_path_meta}/norm_{env_name}.pt")
 
             torch.save({
                 'env_name': env_name,
@@ -866,7 +904,7 @@ class Few_Shot_TD3_Agent:
                 'actor_target_state_dict': self.actor_target_network.state_dict(),
                 'critic_1_target_state_dict': self.critic_target_network1.state_dict(),
                 'critic_2_target_state_dict': self.critic_target_network2.state_dict(),
-            }, f"{self.model_path}/model_{env_name}.pt")
+            }, f"{self.model_path_meta}/model_{env_name}.pt")
 
     def get_env_idx(self, env_name: str):
         """
