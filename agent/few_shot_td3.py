@@ -516,14 +516,14 @@ class Few_Shot_TD3_Agent:
             # log the losses for inner loop updates
             if self.rank ==0:
                 if self.meta_update_counter % self.args.policy_delay == 0:
-                    self.writer.add_scalar(f"env_{env_idx}/actor_loss", actor_loss, self.meta_update_counter)
-                self.writer.add_scalar(f"env_{env_idx}/critic_loss1", critic_loss1, self.meta_update_counter)
-                self.writer.add_scalar(f"env_{env_idx}/critic_loss2", critic_loss2, self.meta_update_counter)
+                    self.writer.add_scalar(f"meta_env_{env_idx}/actor_loss", actor_loss, self.meta_update_counter)
+                self.writer.add_scalar(f"meta_env_{env_idx}/critic_loss1", critic_loss1, self.meta_update_counter)
+                self.writer.add_scalar(f"meta_env_{env_idx}/critic_loss2", critic_loss2, self.meta_update_counter)
                 if self.args.track:
                     if self.meta_update_counter % self.args.policy_delay == 0:
-                        wandb.log({f"env_{env_idx}/actor_loss": actor_loss}, step=self.meta_update_counter)
-                    wandb.log({f"env_{env_idx}/critic_loss1": critic_loss1}, step=self.meta_update_counter)
-                    wandb.log({f"env_{env_idx}/critic_loss2": critic_loss2}, step=self.meta_update_counter)
+                        wandb.log({f"meta_env_{env_idx}/actor_loss": actor_loss}, step=self.meta_update_counter)
+                    wandb.log({f"meta_env_{env_idx}/critic_loss1": critic_loss1}, step=self.meta_update_counter)
+                    wandb.log({f"meta_env_{env_idx}/critic_loss2": critic_loss2}, step=self.meta_update_counter)
         else:
             if self.inner_update_counter % self.args.policy_delay == 0:
                 actions_real = self.inner_actor_networks[env_idx](inputs_norm_tensor)
@@ -584,7 +584,51 @@ class Few_Shot_TD3_Agent:
 
         # train the task-specific networks
         for _ in range(self.args.n_batches):
+
+            # increase the inner update counter
+            self.inner_update_counter += 1
+
+            # compute the loss
             inner_actor_loss, inner_critic_loss1, inner_critic_loss2 = self.compute_loss(env_idx)
+
+            # update the actor network
+            if self.inner_update_counter % self.args.policy_delay == 0:
+                self.inner_actor_optims[env_idx].zero_grad()
+                inner_actor_loss.backward()
+                sync_grads(actor_network)
+                self.inner_actor_optims[env_idx].step()
+
+            # update the critic network
+            self.inner_critic_optims1[env_idx].zero_grad()
+            inner_critic_loss1.backward()
+            sync_grads(critic_network1)
+            self.inner_critic_optims1[env_idx].step()
+
+            # update the critic network
+            self.inner_critic_optims2[env_idx].zero_grad()
+            inner_critic_loss2.backward()
+            sync_grads(critic_network2)
+            self.inner_critic_optims2[env_idx].step()
+
+            # soft update the target networks
+            if self.inner_update_counter % self.args.policy_delay == 0:
+                self._soft_update_target_network(actor_target_network, actor_network)
+                self._soft_update_target_network(critic_target_network1, critic_network1)
+                self._soft_update_target_network(critic_target_network2, critic_network2)
+
+        # soft update the target networks
+        if self.global_step % self.args.policy_delay == 0:
+            self._soft_update_target_network(actor_target_network, actor_network)
+            self._soft_update_target_network(critic_target_network1, critic_network1)
+            self._soft_update_target_network(critic_target_network2, critic_network2)
+
+        # sample new trajectories using the updated actor network
+        mb_obs, mb_ag, mb_g, mb_actions = self.sample_trajectories(actor_network, env_idx)
+
+        # store the episodes in the meta replay buffer
+        # self.meta_buffers[env_idx].clear_buffer()
+        self.meta_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
+        self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
 
     def sample_trajectories(self, actor_network, env_idx):

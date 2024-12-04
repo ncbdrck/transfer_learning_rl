@@ -9,7 +9,7 @@ Here are the param for the training
 def get_args():
     parser = argparse.ArgumentParser()
     # the environment setting
-    parser.add_argument('--exp-name', type=str, default='meta_td3', help='the experiment name')
+    parser.add_argument('--exp-name', type=str, default='Test', help='the experiment name')
     parser.add_argument('--n-epochs', type=int, default=100, help='the number of epochs to train the agent')
     parser.add_argument('--n-cycles', type=int, default=100, help='the times to collect samples per epoch')
     parser.add_argument('--n-batches', type=int, default=40, help='the times to update the inner networks')
@@ -67,7 +67,7 @@ def get_args():
                         help='the noise clip value added to the target policy during critic update')
     parser.add_argument('--policy-delay', type=int, default=2,
                         help='the delay in updating the policy')
-    parser.add_argument('--learning_starts', type=int, default=3,
+    parser.add_argument('--learning_starts', type=int, default=10,
                         help='the number of steps before learning starts')
 
     # Additional args for MAML TD3 - Jay
