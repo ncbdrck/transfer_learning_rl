@@ -12,7 +12,7 @@ def get_args():
     parser.add_argument('--exp-name', type=str, default='Test', help='the experiment name')
     parser.add_argument('--n-epochs', type=int, default=100, help='the number of epochs to train the agent')
     parser.add_argument('--n-cycles', type=int, default=100, help='the times to collect samples per epoch')
-    parser.add_argument('--n-batches', type=int, default=40, help='the times to update the inner networks')
+    parser.add_argument('--n-batches', type=int, default=80, help='the times to update the inner networks')
     parser.add_argument('--save-interval', type=int, default=5, help='the interval that save the trajectory')
     parser.add_argument('--seed', type=int, default=123, help='random seed')
     parser.add_argument('--num-workers', type=int, default=1, help='the number of cpus to collect samples')
@@ -27,8 +27,6 @@ def get_args():
     parser.add_argument('--batch-size', type=int, default=256, help='the sample batch size')
     parser.add_argument('--gamma', type=float, default=0.98, help='the discount factor')
     parser.add_argument('--action-l2', type=float, default=1, help='l2 reg')
-    parser.add_argument('--lr-actor', type=float, default=0.001, help='the learning rate of the actor')
-    parser.add_argument('--lr-critic', type=float, default=0.001, help='the learning rate of the critic')
     parser.add_argument('--polyak', type=float, default=0.95, help='the average coefficient')
     parser.add_argument('--n-test-rollouts', type=int, default=10, help='the number of tests')
     parser.add_argument('--clip-range', type=float, default=5, help='the clip range')
@@ -67,7 +65,7 @@ def get_args():
                         help='the noise clip value added to the target policy during critic update')
     parser.add_argument('--policy-delay', type=int, default=2,
                         help='the delay in updating the policy')
-    parser.add_argument('--learning_starts', type=int, default=10,
+    parser.add_argument('--learning_starts', type=int, default=0,
                         help='the number of steps before learning starts')
 
     # Additional args for MAML TD3 - Jay

@@ -34,7 +34,7 @@ class Few_Shot_TD3_Agent:
         self.beta = args.maml_beta
 
         self.log_interval = args.log_interval # for logging the training metrics
-        self.learning_starts = args.learning_starts  # todo: learning starts after these many steps
+        self.learning_starts = args.learning_starts  # learning starts after these many steps
 
         # Individual environment logging as well as for dynamic gradient updates
         self.success_history_env = [[] for _ in range(len(envs))]
@@ -65,7 +65,7 @@ class Few_Shot_TD3_Agent:
 
         # Initialize the Tensorboard Summary Writer
         if self.rank == 0:
-            self.writer = SummaryWriter(f"runs/{self.run_name}")
+            self.writer = SummaryWriter(f"runs/{self.run_name}/tensorboard")
             self.writer.add_text(
                 "hyperparameters",
                 "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
@@ -115,7 +115,7 @@ class Few_Shot_TD3_Agent:
             else:
                 raise FileNotFoundError(f"Model not found at {load_path}")
 
-        # load the global step if only we are continuing the training (need to execute this in all the processes)
+        # sync the global step if only we are continuing the training (need to execute this in all the processes)
         if self.args.continue_training_log and self.args.load_model:
 
             # broadcast the global step to all the cpus
@@ -470,7 +470,7 @@ class Few_Shot_TD3_Agent:
         with torch.no_grad():
             noise = (torch.randn_like(actions_tensor) * self.args.policy_noise).clamp(-self.args.noise_clip,
                                                                                       self.args.noise_clip)
-            max_action_env = self.env_params_list[env_idx]['action_max']
+            max_action = self.env_params_list[env_idx]['action_max']
 
             if meta:
 
@@ -484,12 +484,12 @@ class Few_Shot_TD3_Agent:
                 target_q_value = torch.clamp(target_q_value, -clip_return, 0)
             else:
                 actions_next = (self.inner_actor_target_networks[env_idx](inputs_next_norm_tensor,
-                                                                          max_action_env) + noise).clamp(
+                                                                          max_action) + noise).clamp(
                     -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
                 q_target1 = self.inner_critic_target_networks1[env_idx](inputs_next_norm_tensor, actions_next,
-                                                                        max_action_env)
+                                                                        max_action)
                 q_target2 = self.inner_critic_target_networks2[env_idx](inputs_next_norm_tensor, actions_next,
-                                                                        max_action_env)
+                                                                        max_action)
                 q_target = torch.min(q_target1, q_target2)
                 target_q_value = r_tensor + self.args.gamma * q_target
                 clip_return = 1 / (1 - self.args.gamma)
@@ -502,8 +502,8 @@ class Few_Shot_TD3_Agent:
             critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
             critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
         else:
-            real_q_value1 = self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_tensor, max_action_env)
-            real_q_value2 = self.inner_critic_networks2[env_idx](inputs_norm_tensor, actions_tensor, max_action_env)
+            real_q_value1 = self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_tensor, max_action)
+            real_q_value2 = self.inner_critic_networks2[env_idx](inputs_norm_tensor, actions_tensor, max_action)
             critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
             critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
 
@@ -537,8 +537,8 @@ class Few_Shot_TD3_Agent:
                     wandb.log({f"meta_env_{env_idx}/critic_loss2": critic_loss2}, step=self.meta_update_counter)
         else:
             if self.inner_update_counter % self.args.policy_delay == 0:
-                actions_real = self.inner_actor_networks[env_idx](inputs_norm_tensor, max_action_env)
-                actor_loss = -self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_real, max_action_env).mean()
+                actions_real = self.inner_actor_networks[env_idx](inputs_norm_tensor, max_action)
+                actor_loss = -self.inner_critic_networks1[env_idx](inputs_norm_tensor, actions_real, max_action).mean()
                 # Add action regularization to keep the actions in check
                 actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
                     2).mean()
@@ -566,28 +566,19 @@ class Few_Shot_TD3_Agent:
         Sample trajectories and store them in the replay buffer. update the networks using the inner loop
         :param env_idx: Index of the environment
         """
-
-        # retrieve the task-specific networks
-        actor_network = self.inner_actor_networks[env_idx]
-        critic_network1 = self.inner_critic_networks1[env_idx]
-        critic_network2 = self.inner_critic_networks2[env_idx]
-        actor_target_network = self.inner_actor_target_networks[env_idx]
-        critic_target_network1 = self.inner_critic_target_networks1[env_idx]
-        critic_target_network2 = self.inner_critic_target_networks2[env_idx]
-
         # copy the networks only after learning starts
         if self.global_step > self.learning_starts:
             # copy the networks
             # todo: try without copying any networks
-            actor_network.load_state_dict(self.actor_network.state_dict())
-            critic_network1.load_state_dict(self.critic_network1.state_dict())
-            critic_network2.load_state_dict(self.critic_network2.state_dict())
-            # actor_target_network.load_state_dict(self.actor_target_network.state_dict())
-            # critic_target_network1.load_state_dict(self.critic_target_network1.state_dict())
-            # critic_target_network2.load_state_dict(self.critic_target_network2.state_dict())
+            self.inner_actor_networks[env_idx].load_state_dict(self.actor_network.state_dict())
+            self.inner_critic_networks1[env_idx].load_state_dict(self.critic_network1.state_dict())
+            self.inner_critic_networks2[env_idx].load_state_dict(self.critic_network2.state_dict())
+            self.inner_actor_target_networks[env_idx].load_state_dict(self.actor_target_network.state_dict())
+            self.inner_critic_target_networks1[env_idx].load_state_dict(self.critic_target_network1.state_dict())
+            self.inner_critic_target_networks2[env_idx].load_state_dict(self.critic_target_network2.state_dict())
 
         # sample trajectories using the actor network
-        mb_obs, mb_ag, mb_g, mb_actions = self.sample_trajectories(actor_network, env_idx)
+        mb_obs, mb_ag, mb_g, mb_actions = self.sample_trajectories(env_idx)
 
         # store the episodes
         self.inner_buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
@@ -606,35 +597,41 @@ class Few_Shot_TD3_Agent:
             if self.inner_update_counter % self.args.policy_delay == 0:
                 self.inner_actor_optims[env_idx].zero_grad()
                 inner_actor_loss.backward()
-                sync_grads(actor_network)
+                sync_grads(self.inner_actor_networks[env_idx])
                 self.inner_actor_optims[env_idx].step()
 
             # update the critic network
             self.inner_critic_optims1[env_idx].zero_grad()
             inner_critic_loss1.backward()
-            sync_grads(critic_network1)
+            sync_grads(self.inner_critic_networks1[env_idx])
             self.inner_critic_optims1[env_idx].step()
 
             # update the critic network
             self.inner_critic_optims2[env_idx].zero_grad()
             inner_critic_loss2.backward()
-            sync_grads(critic_network2)
+            sync_grads(self.inner_critic_networks2[env_idx])
             self.inner_critic_optims2[env_idx].step()
 
             # soft update the target networks
             if self.inner_update_counter % self.args.policy_delay == 0:
-                self._soft_update_target_network(actor_target_network, actor_network)
-                self._soft_update_target_network(critic_target_network1, critic_network1)
-                self._soft_update_target_network(critic_target_network2, critic_network2)
+                self._soft_update_target_network(self.inner_actor_target_networks[env_idx],
+                                                 self.inner_actor_networks[env_idx])
+                self._soft_update_target_network(self.inner_critic_target_networks1[env_idx],
+                                                 self.inner_critic_networks1[env_idx])
+                self._soft_update_target_network(self.inner_critic_target_networks2[env_idx],
+                                                 self.inner_critic_networks2[env_idx])
 
         # soft update the target networks
         if self.global_step % self.args.policy_delay == 0:
-            self._soft_update_target_network(actor_target_network, actor_network)
-            self._soft_update_target_network(critic_target_network1, critic_network1)
-            self._soft_update_target_network(critic_target_network2, critic_network2)
+            self._soft_update_target_network(self.inner_actor_target_networks[env_idx],
+                                             self.inner_actor_networks[env_idx])
+            self._soft_update_target_network(self.inner_critic_target_networks1[env_idx],
+                                                self.inner_critic_networks1[env_idx])
+            self._soft_update_target_network(self.inner_critic_target_networks2[env_idx],
+                                                self.inner_critic_networks2[env_idx])
 
         # sample new trajectories using the updated actor network
-        mb_obs, mb_ag, mb_g, mb_actions = self.sample_trajectories(actor_network, env_idx)
+        mb_obs, mb_ag, mb_g, mb_actions = self.sample_trajectories(env_idx)
 
         # store the episodes in the meta-replay buffer
         # self.meta_buffers[env_idx].clear_buffer()
@@ -642,13 +639,16 @@ class Few_Shot_TD3_Agent:
         self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
 
-    def sample_trajectories(self, actor_network, env_idx):
+    def sample_trajectories(self, env_idx):
         """
         Sample trajectories using the actor network
         """
 
         # retrieve the task-specific variables
         env = self.envs[env_idx]
+
+        # get the actor network
+        actor_network = self.inner_actor_networks[env_idx]
 
         mb_obs, mb_ag, mb_g, mb_actions = [], [], [], []
         for _ in range(self.args.maml_K):
