@@ -79,6 +79,10 @@ def get_args():
                         help='the number of episodes to sample for each iteration')
     parser.add_argument('--transformer_agent', type=bool, default=False,
                         help='if toggled, this experiment will use the transformer agent')
+    parser.add_argument('--success_rate_calculation_interval', type=int, default=10,
+                        help='the interval to calculate the success rate')
+    parser.add_argument('--tau_softmax', type=float, default=0.9,
+                        help='the threshold for the dynamic weight calculation')
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
 

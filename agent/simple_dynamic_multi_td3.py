@@ -16,7 +16,7 @@ import wandb
 import time
 import pickle
 import json
-
+import math
 """
 TD3 with HER (MPI-version) for multi-task learning
 """
@@ -35,6 +35,8 @@ class TD3_Agent:
         self.global_step_env = [0 for _ in range(len(envs))]
         self.global_step = 0  # for outer loop
         self.update_counter = 0  # for inner loop
+        self.task_success_rates = {env_name: [] for env_name in env_names}
+        self.easiness_scores = {env_name: [] for env_name in env_names}
 
         # Variables for logging and saving the model
         self.exp_name: str = os.path.basename(__file__)[: -len(".py")]  # Name of the experiment
@@ -545,6 +547,9 @@ class TD3_Agent:
         # get env name
         env_name = self.env_names[env_idx]
 
+        # append the task success rate
+        self.task_success_rates[env_name].append(is_success)
+
         # append the episode length and calculate the mean
         self.ep_len_history_env[env_idx].append(episode_length)
         if len(self.ep_len_history_env[env_idx]) >= self.log_interval:
@@ -796,3 +801,41 @@ class TD3_Agent:
         """
         return self.env_names[env_idx]
 
+    def compute_task_easiness(self):
+        easiness_scores = {}
+        # Consider the average success rate over the last success_rate_calculation_interval episodes
+        for env_name in self.env_names:
+            recent_successes = self.task_success_rates[env_name][-self.args.success_rate_calculation_interval:]
+            if recent_successes:
+                avg_success = sum(recent_successes) / len(recent_successes)
+            else:
+                avg_success = 0.0
+
+            # Easiness score = avg_success for now (simple criteria)
+            easiness_scores[env_name] = avg_success
+
+            # store the easiness score
+            self.easiness_scores[env_name].append(avg_success)
+
+            # log the easiness score
+            if self.rank == 0:
+                self.writer.add_scalar(f"{env_name}/easiness_score", avg_success, self.global_step_env[self.get_env_idx(env_name)])
+                if self.args.track:
+                    wandb.log({f"{env_name}/easiness_score": avg_success}, step=self.global_step_env[self.get_env_idx(env_name)])
+        return easiness_scores
+
+    # Simpler version of the compute_task_weights - Linearly scales the easiness scores to get the weights
+    def compute_task_weights(self):
+        easiness = self.compute_task_easiness()
+        total = sum(easiness.values()) + 1e-8  # Avoid division by zero
+        weights = {env_name: easiness[env_name] / total for env_name in self.env_names}
+
+        return weights
+
+    # Compute task weights using softmax - tau_softmax is the temperature parameter
+    def compute_task_weights_softmax(self):
+        easiness = self.compute_task_easiness()
+        exp_values = {env_name: math.exp(easiness[env_name] / self.args.tau_softmax) for env_name in self.env_names}
+        total = sum(exp_values.values()) + 1e-8
+        weights = {env_name: exp_values[env_name] / total for env_name in self.env_names}
+        return weights
