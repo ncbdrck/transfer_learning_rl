@@ -38,6 +38,9 @@ class TD3_Agent:
         self.task_success_rates = {env_name: [] for env_name in env_names}
         self.easiness_scores = {env_name: [] for env_name in env_names}
 
+        # store done tasks and their task index
+        self.done_tasks = []
+
         # Variables for logging and saving the model
         self.exp_name: str = os.path.basename(__file__)[: -len(".py")]  # Name of the experiment
         self.run_name = f"{args.exp_name}__{self.exp_name}__{args.seed}__{int(time.time())}"
@@ -236,10 +239,20 @@ class TD3_Agent:
         if self.args.multiple_tasks:
             # sample the specific number of tasks if the number of tasks is less than the number of environments
             if self.args.multi_num_tasks < len(self.envs):
-                return np.random.randint(0, len(self.envs), size=self.args.multi_num_tasks).tolist()
+                tasks = np.random.randint(0, len(self.envs), size=self.args.multi_num_tasks).tolist()
+
+                # remove the tasks that are already done
+                tasks = [task for task in tasks if task not in self.done_tasks]
+
+                return tasks
             else:
                 # if the number of tasks is greater than the number of environments, sample all the environments (default)
-                return list(range(len(self.envs)))
+                tasks = list(range(len(self.envs)))
+
+                # remove the tasks that are already done
+                tasks = [task for task in tasks if task not in self.done_tasks]
+
+                return tasks
         else:
             # sample a single task
             return [np.random.randint(0, len(self.envs))]
@@ -256,6 +269,16 @@ class TD3_Agent:
         for env_idx in tasks:
             # sample the trajectories
             self.inner_loop(env_idx)
+
+        # Recompute weights each iteration or cycle
+        if self.args.use_softmax_weights:
+            task_weights = self.compute_task_weights_softmax(tasks)
+        else:
+            task_weights = self.compute_task_weights(tasks)
+
+        # print the task weights
+        if self.rank == 0:
+            print(f"Task weights: {task_weights}")
 
         for _ in range(self.args.n_batches):
             total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
@@ -281,15 +304,18 @@ class TD3_Agent:
                     print(f"env:{env_idx} critic_loss1: {critic_loss1.requires_grad}")
                     print(f"env:{env_idx} critic_loss2: {critic_loss2.requires_grad}")
 
-                # Accumulate losses
-                total_actor_loss += actor_loss
-                total_critic_loss1 += critic_loss1
-                total_critic_loss2 += critic_loss2
+                env_name = self.env_names[env_idx]
+                w = task_weights.get(env_name, 1.0 / len(tasks))  # default weight is 1/N
 
-            # Average the losses across tasks
-            total_actor_loss /= len(tasks)
-            total_critic_loss1 /= len(tasks)
-            total_critic_loss2 /= len(tasks)
+                # Accumulate losses
+                total_actor_loss += w * actor_loss
+                total_critic_loss1 += w * critic_loss1
+                total_critic_loss2 += w * critic_loss2
+
+            # # Average the losses across tasks
+            # total_actor_loss /= len(tasks)
+            # total_critic_loss1 /= len(tasks)
+            # total_critic_loss2 /= len(tasks)
 
             if self.args.debug:
                 print(f"update counter: {self.update_counter}, total_critic_loss1: {total_critic_loss1}, "
@@ -337,6 +363,9 @@ class TD3_Agent:
             self._soft_update_target_network(self.actor_target_network, self.actor_network)
             self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
             self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
+
+        # check if the task is mastered and remove it from the list
+        self.update_task_selection(tasks)
 
     def evaluation_and_logging_cycle(self, cycle, epoch):
         """
@@ -669,6 +698,8 @@ class TD3_Agent:
         Evaluate the agent
         :return: mean_success_rate, mean_reward, mean_ep_len, mean_success_rate_per_env, mean_reward_per_env,
         mean_ep_len_per_env
+
+        **** Notice that we are evaluating all the environments even if we are not training on them
         """
         total_success_rate = []
         total_ep_len = []
@@ -801,20 +832,26 @@ class TD3_Agent:
         """
         return self.env_names[env_idx]
 
-    def compute_task_easiness(self):
+    def compute_task_easiness(self, env_names):
         easiness_scores = {}
         # Consider the average success rate over the last success_rate_calculation_interval episodes
-        for env_name in self.env_names:
+
+        for env_name in env_names:
             recent_successes = self.task_success_rates[env_name][-self.args.success_rate_calculation_interval:]
             if recent_successes:
                 avg_success = sum(recent_successes) / len(recent_successes)
+                if self.rank == 0:
+                    print(f"env: {env_name}, recent_successes: {recent_successes}, avg_success: {avg_success}")
             else:
                 avg_success = 0.0
+
+            if self.rank == 0 and self.args.debug:
+                print(f"env: {env_name}, avg_success: {avg_success}")
 
             # Easiness score = avg_success for now (simple criteria)
             easiness_scores[env_name] = avg_success
 
-            # store the easiness score
+            # todo;  store the easiness score - we can use later for task weighting
             self.easiness_scores[env_name].append(avg_success)
 
             # log the easiness score
@@ -825,17 +862,42 @@ class TD3_Agent:
         return easiness_scores
 
     # Simpler version of the compute_task_weights - Linearly scales the easiness scores to get the weights
-    def compute_task_weights(self):
-        easiness = self.compute_task_easiness()
+    def compute_task_weights(self, tasks):
+        env_names = [self.get_env_name(env_idx) for env_idx in tasks]
+        easiness = self.compute_task_easiness(env_names)
         total = sum(easiness.values()) + 1e-8  # Avoid division by zero
-        weights = {env_name: easiness[env_name] / total for env_name in self.env_names}
+        weights = {env_name: easiness[env_name] / total for env_name in env_names}
 
         return weights
 
     # Compute task weights using softmax - tau_softmax is the temperature parameter
-    def compute_task_weights_softmax(self):
-        easiness = self.compute_task_easiness()
-        exp_values = {env_name: math.exp(easiness[env_name] / self.args.tau_softmax) for env_name in self.env_names}
+    def compute_task_weights_softmax(self, tasks):
+        env_names = [self.get_env_name(env_idx) for env_idx in tasks]
+        easiness = self.compute_task_easiness(env_names)
+        exp_values = {env_name: math.exp(easiness[env_name] / self.args.tau_softmax) for env_name in env_names}
         total = sum(exp_values.values()) + 1e-8
-        weights = {env_name: exp_values[env_name] / total for env_name in self.env_names}
+        weights = {env_name: exp_values[env_name] / total for env_name in env_names}
         return weights
+
+    def is_task_mastered(self, env_name):
+        """
+        Check if the task is mastered
+        """
+        recent_successes = self.task_success_rates[env_name][-self.log_interval * 2:]
+        if not recent_successes:
+            return False
+        avg_success = sum(recent_successes) / len(recent_successes)
+        return avg_success > self.args.task_mastered_threshold
+
+    def update_task_selection(self, tasks):
+        # get the env names
+        env_names = [self.get_env_name(env_idx) for env_idx in tasks]
+
+        # Check mastery criteria
+        for env_name in env_names:
+            if self.is_task_mastered(env_name):
+                env_idx = self.get_env_idx(env_name)
+                self.done_tasks.append(env_idx)
+                if self.rank == 0:
+                    print(f"Task {env_name} is mastered!")
+                self.save_model(env_name)
