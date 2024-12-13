@@ -27,6 +27,7 @@ class TD3_Agent:
 
         self.log_interval = args.log_interval # for logging the training metrics
         self.learning_starts = args.learning_starts  # learning starts after these many steps
+        self.success_rate_calculation_interval = args.success_rate_calculation_interval
 
         # Individual environment logging as well as for dynamic gradient updates
         self.success_history_env = [[] for _ in range(len(envs))]
@@ -883,7 +884,7 @@ class TD3_Agent:
         """
         Check if the task is mastered
         """
-        recent_successes = self.task_success_rates[env_name][-self.log_interval * 2:]
+        recent_successes = self.task_success_rates[env_name][-self.success_rate_calculation_interval * 2:]
         if not recent_successes:
             return False
         avg_success = sum(recent_successes) / len(recent_successes)

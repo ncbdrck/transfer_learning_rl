@@ -83,7 +83,7 @@ def get_args():
                         help='the interval to calculate the success rate')
     parser.add_argument('--tau_softmax', type=float, default=0.9,
                         help='the threshold for the dynamic weight calculation')
-    parser.add_argument('--use_softmax_weights', type=bool, default=False,
+    parser.add_argument('--use_softmax_weights', type=bool, default=True,
                         help='if toggled, this experiment will use the softmax for dynamic weight calculation')
     parser.add_argument('--task_mastered_threshold', type=float, default=0.9,
                         help='the threshold to consider the task is mastered')
