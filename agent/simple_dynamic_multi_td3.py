@@ -366,7 +366,8 @@ class TD3_Agent:
             self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
 
         # check if the task is mastered and remove it from the list
-        self.update_task_selection(tasks)
+        if self.rank == 0:
+            self.update_task_selection(tasks)
 
     def evaluation_and_logging_cycle(self, cycle, epoch):
         """
@@ -561,7 +562,15 @@ class TD3_Agent:
 
         # store the episodes
         self.buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
-        self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
+
+        # sync the task mastered list
+        self.done_tasks = MPI.COMM_WORLD.bcast(self.done_tasks, root=0)
+
+        # check if this task is not inside the done tasks
+        # if we don't do this, updating the normalizer will throw an error since it syncs across all the cpus
+        if env_idx not in self.done_tasks:
+            # update the normalizer
+            self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
     def _log_episode(self, env_idx, episode_length, episode_reward, is_success):
         """
@@ -759,6 +768,8 @@ class TD3_Agent:
 
         # for all the environments
         local_success_rate = np.mean(total_success_rate)
+        if self.rank == 0:
+            print(f"local_success_rate: {local_success_rate}")
         global_success_rate = MPI.COMM_WORLD.allreduce(local_success_rate, op=MPI.SUM)
         local_ep_len = np.mean(total_ep_len)
         global_ep_len = MPI.COMM_WORLD.allreduce(local_ep_len, op=MPI.SUM)
@@ -775,6 +786,8 @@ class TD3_Agent:
         mean_reward_per_env = {env_name: np.float32(0) for env_name in self.env_names}
         for env_name in self.env_names:
             local_success_rate_env = total_success_rate_per_env[env_name]
+            if self.rank == 0:
+                print(f"local_success_rate_env {env_name}: {local_success_rate_env}")
             global_success_rate_env = MPI.COMM_WORLD.allreduce(local_success_rate_env, op=MPI.SUM)
             local_reward_env = total_reward_per_env[env_name]
             global_reward_env = MPI.COMM_WORLD.allreduce(local_reward_env, op=MPI.SUM)
@@ -896,9 +909,18 @@ class TD3_Agent:
 
         # Check mastery criteria
         for env_name in env_names:
-            if self.is_task_mastered(env_name):
-                env_idx = self.get_env_idx(env_name)
+            env_idx = self.get_env_idx(env_name)
+
+            # check if the task is already added to the done tasks list
+            is_task_done = env_idx in self.done_tasks
+
+            if not is_task_done and self.is_task_mastered(env_name):
+                # add the task to the done tasks list
                 self.done_tasks.append(env_idx)
+
+                # sync the done tasks list across all the processes
+                self.done_tasks = MPI.COMM_WORLD.bcast(self.done_tasks, root=0)
+
                 if self.rank == 0:
                     print(f"Task {env_name} is mastered!")
                 self.save_model(env_name)

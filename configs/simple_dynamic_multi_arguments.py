@@ -85,7 +85,7 @@ def get_args():
                         help='the threshold for the dynamic weight calculation')
     parser.add_argument('--use_softmax_weights', type=bool, default=True,
                         help='if toggled, this experiment will use the softmax for dynamic weight calculation')
-    parser.add_argument('--task_mastered_threshold', type=float, default=0.9,
+    parser.add_argument('--task_mastered_threshold', type=float, default=0.98,
                         help='the threshold to consider the task is mastered')
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
