@@ -25,9 +25,9 @@ class AdaptationNetwork(nn.Module):
         return x
 
 # define the actor network
-class actor(nn.Module):
+class Actor(nn.Module):
     def __init__(self, input_size=128, act_dim=7):
-        super(actor, self).__init__()
+        super(Actor, self).__init__()
         self.fc1 = nn.Linear(input_size, 256)
         self.fc2 = nn.Linear(256, 256)
         self.fc3 = nn.Linear(256, 256)
@@ -41,9 +41,9 @@ class actor(nn.Module):
 
         return actions
 
-class critic(nn.Module):
+class Critic(nn.Module):
     def __init__(self, input_size=128, act_dim=7):
-        super(critic, self).__init__()
+        super(Critic, self).__init__()
 
         self.fc1 = nn.Linear(input_size + act_dim, 256)
         self.fc2 = nn.Linear(256, 256)

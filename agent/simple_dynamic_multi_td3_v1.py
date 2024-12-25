@@ -7,7 +7,7 @@ from utils.mpi_utils.mpi_utils import sync_networks, sync_grads
 from utils.mpi_utils.normalizer import normalizer
 from utils.replay_buffer import replay_buffer
 from utils.her_modules.her import her_sampler
-from policy.models import actor, critic
+from policy.adaptation_based import Actor, Critic, AdaptationNetwork
 from policy.transformer_based import ActorTransformer, CriticTransformer
 
 # additional imports
@@ -17,17 +17,19 @@ import time
 import pickle
 import json
 import math
+
 """
 TD3 with HER (MPI-version) for multi-task learning
 - v1
 - For envs with different action and observation spaces
+- added Adaptation network for task-specific processing for each environment
 """
 
 
 class TD3_Agent:
     def __init__(self, args, envs, env_params_list, env_names, seed):
 
-        self.log_interval = args.log_interval # for logging the training metrics
+        self.log_interval = args.log_interval  # for logging the training metrics
         self.learning_starts = args.learning_starts  # learning starts after these many steps
         self.success_rate_calculation_interval = args.success_rate_calculation_interval
 
@@ -77,7 +79,11 @@ class TD3_Agent:
         self.env_names = env_names
         self._seed = seed
 
-        # create the network
+        # create adaptation networks for each environment
+        self.adaptation_networks = [AdaptationNetwork(env_params, self.args.feature_size) for env_params in
+                                    env_params_list]
+
+        # create the main network
         if self.args.transformer_agent:
             # create the transformer policy network
             self.actor_network = ActorTransformer(self.env_params)
@@ -88,14 +94,17 @@ class TD3_Agent:
             self.critic_target_network1 = CriticTransformer(self.env_params)
             self.critic_target_network2 = CriticTransformer(self.env_params)
         else:
+            # get the maximum action dimension
+            self.max_action_dim = max([env_params['action'] for env_params in env_params_list])
+
             # create the policy network
-            self.actor_network = actor(self.env_params)
-            self.critic_network1 = critic(self.env_params)
-            self.critic_network2 = critic(self.env_params)
+            self.actor_network = Actor(input_size=self.args.feature_size, act_dim=self.max_action_dim)
+            self.critic_network1 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
+            self.critic_network2 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
             # build up the target network
-            self.actor_target_network = actor(self.env_params)
-            self.critic_target_network1 = critic(self.env_params)
-            self.critic_target_network2 = critic(self.env_params)
+            self.actor_target_network = Actor(input_size=self.args.feature_size, act_dim=self.max_action_dim)
+            self.critic_target_network1 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
+            self.critic_target_network2 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
 
         # Load the model if specified
         global_step = 0  # initialize the global step to 0
@@ -179,7 +188,7 @@ class TD3_Agent:
 
         # create the replay buffer
         self.buffers = [replay_buffer(env_params, self.args.buffer_size, her_module.sample_her_transitions)
-                              for env_params, her_module in zip(env_params_list, self.her_modules)]
+                        for env_params, her_module in zip(env_params_list, self.her_modules)]
 
         # create the normalizer
         self.o_norms_list = [normalizer(size=env_params['obs'], default_clip_range=self.args.clip_range) for env_params
@@ -195,7 +204,7 @@ class TD3_Agent:
             # create the directory if it doesn't exist
             if not os.path.exists(self.model_path):
                 os.makedirs(self.model_path)
-        self.model_path_multi =  f"runs/{self.run_name}/{self.exp_name}"
+        self.model_path_multi = f"runs/{self.run_name}/{self.exp_name}"
 
         # let's save all the configurations
         if self.rank == 0:
@@ -219,7 +228,6 @@ class TD3_Agent:
 
         # save the main model
         if self.rank == 0 and self.args.save_model:
-
             # save the model
             model_save_path = os.path.join(self.model_path_multi, 'model.pt')
 
@@ -298,7 +306,7 @@ class TD3_Agent:
 
             # calculate the loss for each environment
             for env_idx in tasks:
-                actor_loss, critic_loss1, critic_loss2= self.compute_loss(env_idx)
+                actor_loss, critic_loss1, critic_loss2 = self.compute_loss(env_idx)
                 if self.args.debug:
                     print(f"env:{env_idx} actor_loss: {type(actor_loss)},critic_loss1: {type(critic_loss1)}, "
                           f"critic_loss2: {type(critic_loss2)}")
@@ -382,7 +390,7 @@ class TD3_Agent:
 
         success_rate, reward, ep_len, success_rate_per_env, reward_per_env, ep_len_per_env = self.evaluate_agent()
         if self.rank == 0:
-            print(f'[{datetime.now()}] Epoch: {epoch+1}, Cycle : {cycle + 1}, eval success rate: {success_rate:.3f}')
+            print(f'[{datetime.now()}] Epoch: {epoch + 1}, Cycle : {cycle + 1}, eval success rate: {success_rate:.3f}')
             self.writer.add_scalar("Cycle/eval_success_rate", success_rate, self.global_step)
             self.writer.add_scalar("Cycle/eval_reward", reward, self.global_step)
             self.writer.add_scalar("Cycle/eval_ep_len", ep_len, self.global_step)
@@ -393,12 +401,15 @@ class TD3_Agent:
 
             # print and log for each environment
             for env_name in self.env_names:
-                print(f'[{datetime.now()}] Epoch: {epoch+1}, Cycle : {cycle + 1}, eval success rate for {env_name}: {success_rate_per_env[env_name]:.3f}')
-                self.writer.add_scalar(f"Cycle/eval_success_rate_{env_name}", success_rate_per_env[env_name], self.global_step)
+                print(
+                    f'[{datetime.now()}] Epoch: {epoch + 1}, Cycle : {cycle + 1}, eval success rate for {env_name}: {success_rate_per_env[env_name]:.3f}')
+                self.writer.add_scalar(f"Cycle/eval_success_rate_{env_name}", success_rate_per_env[env_name],
+                                       self.global_step)
                 self.writer.add_scalar(f"Cycle/eval_reward_{env_name}", reward_per_env[env_name], self.global_step)
                 self.writer.add_scalar(f"Cycle/eval_ep_len_{env_name}", ep_len_per_env[env_name], self.global_step)
                 if self.args.track:
-                    wandb.log({f"Cycle/eval_success_rate_{env_name}": success_rate_per_env[env_name]}, step=self.global_step)
+                    wandb.log({f"Cycle/eval_success_rate_{env_name}": success_rate_per_env[env_name]},
+                              step=self.global_step)
                     wandb.log({f"Cycle/eval_reward_{env_name}": reward_per_env[env_name]}, step=self.global_step)
                     wandb.log({f"Cycle/eval_ep_len_{env_name}": ep_len_per_env[env_name]}, step=self.global_step)
 
@@ -477,14 +488,14 @@ class TD3_Agent:
             actor_loss = -self.critic_network1(inputs_norm_tensor, actions_real).mean()
             # Add action regularization to keep the actions in check
             actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
-            2).mean()
+                2).mean()
         else:
             actor_loss = torch.tensor(0.0, dtype=torch.float32)
             if self.args.cuda:
                 actor_loss = actor_loss.cuda()
 
         # log the losses for inner loop updates
-        if self.rank ==0:
+        if self.rank == 0:
             if self.update_counter % self.args.policy_delay == 0:
                 self.writer.add_scalar(f"env_{env_idx}/actor_loss", actor_loss, self.update_counter)
             self.writer.add_scalar(f"env_{env_idx}/critic_loss1", critic_loss1, self.update_counter)
@@ -631,7 +642,6 @@ class TD3_Agent:
             if self.args.track:
                 wandb.log({f"{env_name}/mean_success_rate": mean_success_rate}, step=self.global_step_env[env_idx])
 
-
     def _select_actions(self, pi, env_idx):
         action = pi.cpu().numpy().squeeze()
         # add the gaussian
@@ -648,7 +658,6 @@ class TD3_Agent:
         action = np.clip(action, -self.env_params_list[env_idx]['action_max'],
                          self.env_params_list[env_idx]['action_max'])
         return action
-
 
     def _preproc_inputs(self, obs, g, env_idx):
         """
@@ -778,7 +787,7 @@ class TD3_Agent:
         local_reward = np.mean(total_reward)
         global_reward = MPI.COMM_WORLD.allreduce(local_reward, op=MPI.SUM)
 
-        mean_success_rate  = global_success_rate / MPI.COMM_WORLD.Get_size()
+        mean_success_rate = global_success_rate / MPI.COMM_WORLD.Get_size()
         mean_ep_len = global_ep_len / MPI.COMM_WORLD.Get_size()
         mean_reward = global_reward / MPI.COMM_WORLD.Get_size()
 
@@ -872,9 +881,11 @@ class TD3_Agent:
 
             # log the easiness score
             if self.rank == 0:
-                self.writer.add_scalar(f"{env_name}/easiness_score", avg_success, self.global_step_env[self.get_env_idx(env_name)])
+                self.writer.add_scalar(f"{env_name}/easiness_score", avg_success,
+                                       self.global_step_env[self.get_env_idx(env_name)])
                 if self.args.track:
-                    wandb.log({f"{env_name}/easiness_score": avg_success}, step=self.global_step_env[self.get_env_idx(env_name)])
+                    wandb.log({f"{env_name}/easiness_score": avg_success},
+                              step=self.global_step_env[self.get_env_idx(env_name)])
         return easiness_scores
 
     # Simpler version of the compute_task_weights - Linearly scales the easiness scores to get the weights

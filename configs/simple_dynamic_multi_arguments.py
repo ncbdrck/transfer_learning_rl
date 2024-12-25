@@ -88,6 +88,9 @@ def get_args():
     parser.add_argument('--task_mastered_threshold', type=float, default=0.98,
                         help='the threshold to consider the task is mastered')
 
+    # for adaptation based policy - Envs with different action and observation spaces
+    parser.add_argument('--feature_size', type=int, default=128, help='the size of the feature vector')
+
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
 
     args = parser.parse_args()
