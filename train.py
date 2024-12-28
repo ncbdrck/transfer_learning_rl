@@ -3,7 +3,7 @@ import gymnasium as gym
 import os
 from configs.arguments import get_args_vanilla
 from mpi4py import MPI
-from agent.td3 import TD3_Agent
+from agent.multi_task_td3 import TD3_Agent
 import random
 import torch
 
