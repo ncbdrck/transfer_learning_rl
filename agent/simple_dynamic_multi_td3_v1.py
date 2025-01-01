@@ -7,8 +7,6 @@ from utils.mpi_utils.mpi_utils import sync_networks, sync_grads
 from utils.mpi_utils.normalizer import normalizer
 from utils.replay_buffer import replay_buffer
 from utils.her_modules.her import her_sampler
-from policy.adaptation_based import Actor, Critic, AdaptationNetwork
-from policy.transformer_based import ActorTransformer, CriticTransformer
 
 # additional imports
 from torch.utils.tensorboard import SummaryWriter
@@ -18,11 +16,15 @@ import pickle
 import json
 import math
 
+# changes made to imports
+from policy.adaptation_based import Actor, Critic, AdaptationNetwork
+
 """
 TD3 with HER (MPI-version) for multi-task learning
 - v1
 - For envs with different action and observation spaces
 - added Adaptation network for task-specific processing for each environment
+- selects the maximum action space of all the environments for the actor and critic networks
 """
 
 
@@ -74,7 +76,6 @@ class TD3_Agent:
 
         self.args = args
         self.envs = envs
-        self.env_params = env_params_list[0]  # assume all environments have the same action and observation spaces
         self.env_params_list = env_params_list
         self.env_names = env_names
         self._seed = seed
@@ -83,28 +84,17 @@ class TD3_Agent:
         self.adaptation_networks = [AdaptationNetwork(env_params, self.args.feature_size) for env_params in
                                     env_params_list]
 
-        # create the main network
-        if self.args.transformer_agent:
-            # create the transformer policy network
-            self.actor_network = ActorTransformer(self.env_params)
-            self.critic_network1 = CriticTransformer(self.env_params)
-            self.critic_network2 = CriticTransformer(self.env_params)
-            # build up the target network
-            self.actor_target_network = ActorTransformer(self.env_params)
-            self.critic_target_network1 = CriticTransformer(self.env_params)
-            self.critic_target_network2 = CriticTransformer(self.env_params)
-        else:
-            # get the maximum action dimension
-            self.max_action_dim = max([env_params['action'] for env_params in env_params_list])
+        # get the maximum action dimension
+        self.max_action_dim = max([env_params['action'] for env_params in env_params_list])
 
-            # create the policy network
-            self.actor_network = Actor(input_size=self.args.feature_size, act_dim=self.max_action_dim)
-            self.critic_network1 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
-            self.critic_network2 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
-            # build up the target network
-            self.actor_target_network = Actor(input_size=self.args.feature_size, act_dim=self.max_action_dim)
-            self.critic_target_network1 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
-            self.critic_target_network2 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
+        # create the main networks
+        self.actor_network = Actor(input_size=self.args.feature_size, act_dim=self.max_action_dim)
+        self.critic_network1 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
+        self.critic_network2 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
+        # build up the target networks
+        self.actor_target_network = Actor(input_size=self.args.feature_size, act_dim=self.max_action_dim)
+        self.critic_target_network1 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
+        self.critic_target_network2 = Critic(input_size=self.args.feature_size, act_dim=self.max_action_dim)
 
         # Load the model if specified
         global_step = 0  # initialize the global step to 0
@@ -129,6 +119,8 @@ class TD3_Agent:
                 if self.args.continue_training_log:
                     global_step = checkpoint['global_step']
 
+                # todo: load adaptation networks
+
             else:
                 raise FileNotFoundError(f"Model not found at {load_path}")
 
@@ -147,6 +139,10 @@ class TD3_Agent:
         sync_networks(self.critic_network1)
         sync_networks(self.critic_network2)
 
+        # sync the adaptation networks
+        for adaptation_network in self.adaptation_networks:
+            sync_networks(adaptation_network)
+
         # let's print the number of trainable parameters in the model
         if self.rank == 0:
             actor_parm_cnt = self.count_trainable_parameters(self.actor_network)
@@ -155,6 +151,14 @@ class TD3_Agent:
             print("\033[94m" + f"Actor trainable parameters: {actor_parm_cnt:,}" + "\033[0m")
             print("\033[94m" + f"Critic 1 trainable parameters: {critic_1_parm_cnt:,}" + "\033[0m")
             print("\033[94m" + f"Critic 2 trainable parameters: {critic_2_parm_cnt:,}" + "\033[0m")
+
+            # print the adaptation networks
+            for idx, adaptation_network in enumerate(self.adaptation_networks):
+                adaptation_network_parm_cnt = self.count_trainable_parameters(adaptation_network)
+                # get the environment name
+                env_name = self.env_names[idx]
+                print(
+                    "\033[94m" + f"Adaptation Network for {env_name} trainable parameters: {adaptation_network_parm_cnt:,}" + "\033[0m")
 
         # Sync the target networks
         if self.args.load_model:
@@ -177,10 +181,18 @@ class TD3_Agent:
             self.critic_target_network1.cuda()
             self.critic_target_network2.cuda()
 
+            # adaptation networks
+            for adaptation_network in self.adaptation_networks:
+                adaptation_network.cuda()
+
         # create the optimizer
         self.actor_optim = torch.optim.Adam(self.actor_network.parameters(), lr=self.args.lr_actor)
         self.critic_optim1 = torch.optim.Adam(self.critic_network1.parameters(), lr=self.args.lr_critic)
         self.critic_optim2 = torch.optim.Adam(self.critic_network2.parameters(), lr=self.args.lr_critic)
+
+        # adaptation network optimizers
+        self.adaptation_optimizers = [torch.optim.Adam(adaptation_network.parameters(), lr=self.args.lr_adaptation) for
+                                      adaptation_network in self.adaptation_networks]
 
         # her sampler
         self.her_modules = [her_sampler(self.args.replay_strategy, self.args.replay_k, env.compute_reward) for env in
@@ -206,7 +218,7 @@ class TD3_Agent:
                 os.makedirs(self.model_path)
         self.model_path_multi = f"runs/{self.run_name}/{self.exp_name}"
 
-        # let's save all the configurations
+        # let's save all the configurations - easy for debugging and reproducing the results
         if self.rank == 0:
             if not os.path.exists(self.model_path_multi):
                 os.makedirs(self.model_path_multi)
@@ -271,6 +283,10 @@ class TD3_Agent:
     def outer_loop(self, tasks):
         """
         We loop over the tasks and update the networks
+
+        New implementation:
+
+
         :param tasks: List of tasks
         """
 
@@ -292,6 +308,14 @@ class TD3_Agent:
             print(f"Task weights: {task_weights}")
 
         for _ in range(self.args.n_batches):
+
+            # Zero grads for actor, critics, and adaptation networks
+            self.actor_optim.zero_grad()
+            self.critic_optim1.zero_grad()
+            self.critic_optim2.zero_grad()
+            for env_idx in tasks:
+                self.adaptation_optimizers[env_idx].zero_grad()
+
             total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
             total_critic_loss1 = torch.tensor(0.0, dtype=torch.float32)
             total_critic_loss2 = torch.tensor(0.0, dtype=torch.float32)
@@ -344,27 +368,26 @@ class TD3_Agent:
                     wandb.log({"rollout/critic_loss1": total_critic_loss1}, step=self.update_counter)
                     wandb.log({"rollout/critic_loss2": total_critic_loss2}, step=self.update_counter)
 
+            # update the critic_networks
+            critic_loss = total_critic_loss1 + total_critic_loss2
+            critic_loss.backward(retain_graph=True)
+            sync_grads(self.critic_network1)
+            sync_grads(self.critic_network2)
+            self.critic_optim1.step()
+            self.critic_optim2.step()
+
+            # update the adaptation networks
+            for env_idx in tasks:
+                sync_grads(self.adaptation_networks[env_idx])
+                self.adaptation_optimizers[env_idx].step()
+
+            # update the actor network
             if self.update_counter % self.args.policy_delay == 0:
-                # update the actor network
-                self.actor_optim.zero_grad()
                 total_actor_loss.backward()
                 sync_grads(self.actor_network)
                 self.actor_optim.step()
 
-            # update the critic_network1
-            self.critic_optim1.zero_grad()
-            total_critic_loss1.backward()
-            sync_grads(self.critic_network1)
-            self.critic_optim1.step()
-
-            # update the critic_network2
-            self.critic_optim2.zero_grad()
-            total_critic_loss2.backward()
-            sync_grads(self.critic_network2)
-            self.critic_optim2.step()
-
-            # soft update the target networks
-            if self.update_counter % self.args.policy_delay == 0:
+                # soft update the target networks
                 self._soft_update_target_network(self.actor_target_network, self.actor_network)
                 self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
                 self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
@@ -426,6 +449,12 @@ class TD3_Agent:
     def compute_loss(self, env_idx):
         """
         Compute the actor and critic loss
+
+        New implementation:
+        - Compute the target Q-values using the adaptation network
+        - Compute the actor loss using the adaptation network
+        - Compute the critic loss using the adaptation network
+
         :param env_idx: Index of the environment
         :return: actor_loss, critic_loss1, critic_loss2
         """
@@ -437,6 +466,14 @@ class TD3_Agent:
         o, o_next, g = transitions['obs'], transitions['obs_next'], transitions['g']
         transitions['obs'], transitions['g'] = self._preproc_og(o, g)
         transitions['obs_next'], transitions['g_next'] = self._preproc_og(o_next, g)
+
+        # Pre-process the actions to have the same dimension as the maximum action dimension
+        acts = transitions['actions']
+        # check if the action dimension is less than the maximum action dimension
+        if acts.shape[1] < self.max_action_dim:
+            padded = np.zeros((acts.shape[0], self.max_action_dim), dtype=acts.dtype)
+            padded[:, :acts.shape[1]] = acts
+            transitions['actions'] = padded
 
         # Normalize the inputs
         obs_norm = self.o_norms_list[env_idx].normalize(transitions['obs'])
@@ -463,18 +500,21 @@ class TD3_Agent:
         with torch.no_grad():
             noise = (torch.randn_like(actions_tensor) * self.args.policy_noise).clamp(-self.args.noise_clip,
                                                                                       self.args.noise_clip)
-            actions_next = (self.actor_target_network(inputs_next_norm_tensor) + noise).clamp(
+            z_next = self.adaptation_networks[env_idx](inputs_next_norm_tensor)
+            actions_next = (
+                        self.actor_target_network(z_next, self.env_params_list[env_idx]['action_max']) + noise).clamp(
                 -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
-            q_target1 = self.critic_target_network1(inputs_next_norm_tensor, actions_next)
-            q_target2 = self.critic_target_network2(inputs_next_norm_tensor, actions_next)
+            q_target1 = self.critic_target_network1(z_next, actions_next, self.env_params_list[env_idx]['action_max'])
+            q_target2 = self.critic_target_network2(z_next, actions_next, self.env_params_list[env_idx]['action_max'])
             q_target = torch.min(q_target1, q_target2)
             target_q_value = r_tensor + self.args.gamma * q_target
             clip_return = 1 / (1 - self.args.gamma)
             target_q_value = torch.clamp(target_q_value, -clip_return, 0)
 
         # Compute current Q-values and the critic loss
-        real_q_value1 = self.critic_network1(inputs_norm_tensor, actions_tensor)
-        real_q_value2 = self.critic_network2(inputs_norm_tensor, actions_tensor)
+        z = self.adaptation_networks[env_idx](inputs_norm_tensor)
+        real_q_value1 = self.critic_network1(z, actions_tensor, self.env_params_list[env_idx]['action_max'])
+        real_q_value2 = self.critic_network2(z, actions_tensor, self.env_params_list[env_idx]['action_max'])
         critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
         critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
 
@@ -484,8 +524,8 @@ class TD3_Agent:
 
         # Compute actor loss
         if self.update_counter % self.args.policy_delay == 0:
-            actions_real = self.actor_network(inputs_norm_tensor)
-            actor_loss = -self.critic_network1(inputs_norm_tensor, actions_real).mean()
+            actions_real = self.actor_network(z, self.env_params_list[env_idx]['action_max'])
+            actor_loss = -self.critic_network1(z, actions_real, self.env_params_list[env_idx]['action_max']).mean()
             # Add action regularization to keep the actions in check
             actor_loss += self.args.action_l2 * (actions_real / self.env_params_list[env_idx]['action_max']).pow(
                 2).mean()
@@ -511,6 +551,10 @@ class TD3_Agent:
     def inner_loop(self, env_idx):
         """
         Sample trajectories and store them in the replay buffer
+
+        New implementation:
+        - Sample the trajectories using the adaptation network
+
         :param env_idx: Index of the environment
         """
 
@@ -532,7 +576,8 @@ class TD3_Agent:
             for t in range(self.env_params_list[env_idx]['max_timesteps']):
                 with torch.no_grad():
                     input_tensor = self._preproc_inputs(obs, g, env_idx)
-                    pi = self.actor_network(input_tensor)
+                    extracted_features = self.adaptation_networks[env_idx](input_tensor)
+                    pi = self.actor_network(extracted_features, self.env_params_list[env_idx]['action_max'])
                     action = self._select_actions(pi, env_idx)
                 observation_new, r, term, trunc, info = env.step(action)
                 obs_new = observation_new['observation']
@@ -599,7 +644,7 @@ class TD3_Agent:
         # get env name
         env_name = self.env_names[env_idx]
 
-        # append the task success rate
+        # append the task success rate for calculating the easiness score
         self.task_success_rates[env_name].append(is_success)
 
         # append the episode length and calculate the mean
@@ -643,7 +688,24 @@ class TD3_Agent:
                 wandb.log({f"{env_name}/mean_success_rate": mean_success_rate}, step=self.global_step_env[env_idx])
 
     def _select_actions(self, pi, env_idx):
+        """
+        Select the actions based on the policy
+
+        New implementation:
+        - Actions are clipped to the action space of the environment
+
+        :param pi:
+        :param env_idx:
+        :return:
+        """
         action = pi.cpu().numpy().squeeze()
+
+        # extract the action dimension of the environment (since we are using the same network for all the environments)
+        action_dim = self.env_params_list[env_idx]['action']
+
+        # slice the action to the correct dimension
+        action = action[:action_dim]
+
         # add the gaussian
         action += self.args.noise_eps * self.env_params_list[env_idx]['action_max'] * np.random.randn(*action.shape)
         action = np.clip(action, -self.env_params_list[env_idx]['action_max'],
@@ -750,8 +812,12 @@ class TD3_Agent:
                 for t in range(self.env_params_list[env_idx]['max_timesteps']):
                     with torch.no_grad():
                         input_tensor = self._preproc_inputs(obs, g, env_idx)
-                        pi = self.actor_network(input_tensor)
+                        extracted_features = self.adaptation_networks[env_idx](input_tensor)
+                        pi = self.actor_network(extracted_features, self.env_params_list[env_idx]['action_max'])
                         actions = pi.detach().cpu().numpy().squeeze()
+                        # slice the actions to the correct dimension
+                        action_dim = self.env_params_list[env_idx]['action']
+                        actions = actions[:action_dim]
                     observation_new, reward, term, trunc, info = env.step(actions)
 
                     if not done_flag:

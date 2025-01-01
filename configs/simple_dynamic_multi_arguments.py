@@ -35,7 +35,8 @@ def get_args():
     parser.add_argument('--clip-range', type=float, default=5, help='the clip range')
     parser.add_argument('--demo-length', type=int, default=20, help='the demo length')
     parser.add_argument('--cuda', action='store_true', help='if use gpu do the acceleration')
-    parser.add_argument('--num-rollouts-per-mpi', type=int, default=10, help='the rollouts per mpi')  # we did not use this
+    parser.add_argument('--num-rollouts-per-mpi', type=int, default=10,
+                        help='the rollouts per mpi')  # we did not use this
 
     # Additional args for logging and saving the model
     parser.add_argument('--track', type=bool, default=False,
@@ -89,7 +90,8 @@ def get_args():
                         help='the threshold to consider the task is mastered')
 
     # for adaptation based policy - Envs with different action and observation spaces
-    parser.add_argument('--feature_size', type=int, default=128, help='the size of the feature vector')
+    parser.add_argument('--feature_size', type=int, default=128, help='the size of the feature vector for adaptation')
+    parser.add_argument('--lr_adaptation', type=float, default=0.001, help='the learning rate of the adaptation model')
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
 
