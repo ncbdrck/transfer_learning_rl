@@ -999,7 +999,8 @@ class TD3_Agent:
 
                 # sync the done tasks list across all the processes
                 self.done_tasks = MPI.COMM_WORLD.bcast(self.done_tasks, root=0)
+                print("\033[92m" +  f"Task {env_name} is mastered!" + "\033[0m")
 
-                if self.rank == 0:
-                    print(f"Task {env_name} is mastered!")
+                # save the model
                 self.save_model(env_name)
+                print("\033[91m" + f"Task {env_name} Model saved!" + "\033[0m")
