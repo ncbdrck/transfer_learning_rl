@@ -86,9 +86,11 @@ def get_args():
     parser.add_argument('--task_mastered_threshold', type=float, default=0.98,
                         help='the threshold to consider the task is mastered')
 
-    # for adaptation based policy - Envs with different action and observation spaces
-    parser.add_argument('--feature_size', type=int, default=128, help='the size of the feature vector for adaptation')
-    parser.add_argument('--lr_adaptation', type=float, default=0.001, help='the learning rate of the adaptation model')
+    # for dynamic task learning
+    parser.add_argument('--alpha_success_rate', type=float, default=1.0, help='the hyperparameter for the success rate')
+    parser.add_argument('--beta_learning_progress', type=float, default=0.5, help='the hyperparameter for the learning progress')
+    parser.add_argument('--gamma_critic_loss', type=float, default=0.01, help='the hyperparameter for the critic loss')
+    parser.add_argument('--critic_loss_window', type=int, default=100, help='the window size for the critic loss')
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
 

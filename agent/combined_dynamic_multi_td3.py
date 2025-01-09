@@ -40,6 +40,9 @@ class TD3_Agent:
         self.global_step = 0  # for outer loop
         self.update_counter = 0  # for inner loop
         self.task_success_rates = {env_name: [] for env_name in env_names}
+        self.prev_success_rate = {env_name: 0.0 for env_name in env_names}
+        self.critic_loss_history = {env_name: [] for env_name in env_names}
+        self.rolling_avg_critic_loss = {env_name: 0.0 for env_name in env_names}
         self.easiness_scores = {env_name: [] for env_name in env_names}
 
         # store done tasks and their task index
@@ -248,6 +251,11 @@ class TD3_Agent:
                 # remove the tasks that are already done
                 tasks = [task for task in tasks if task not in self.done_tasks]
 
+                # exit the program if all the tasks are done
+                if len(tasks) == 0:
+                    print("\033[92m" + "All the tasks are mastered. Exiting the program!" + "\033[0m")
+                    exit()
+
                 return tasks
             else:
                 # if the number of tasks is greater than the number of environments, sample all the environments (default)
@@ -255,6 +263,11 @@ class TD3_Agent:
 
                 # remove the tasks that are already done
                 tasks = [task for task in tasks if task not in self.done_tasks]
+
+                # exit the program if all the tasks are done
+                if len(tasks) == 0:
+                    print("\033[92m" + "All the tasks are mastered. Exiting the program!" + "\033[0m")
+                    exit()
 
                 return tasks
         else:
