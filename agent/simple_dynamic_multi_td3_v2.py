@@ -25,6 +25,7 @@ TD3 with HER (MPI-version) for multi-task learning
 - For envs with different action and observation spaces
 - added Adaptation network for task-specific processing for each environment
 - selects the maximum action space of all the environments for the actor and critic networks
+- Loop over the tasks and update the adaptation networks by calculating the adap loss for each environment
 """
 
 
@@ -309,16 +310,13 @@ class TD3_Agent:
 
         for _ in range(self.args.n_batches):
 
-            # Zero grads for actor, critics, and adaptation networks
-            self.actor_optim.zero_grad()
-            self.critic_optim1.zero_grad()
-            self.critic_optim2.zero_grad()
-            for env_idx in tasks:
-                self.adaptation_optimizers[env_idx].zero_grad()
-
+            # initialize the losses
             total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
             total_critic_loss1 = torch.tensor(0.0, dtype=torch.float32)
             total_critic_loss2 = torch.tensor(0.0, dtype=torch.float32)
+
+            # adaptation loss per environment - Dictionary
+            adaptation_loss = {env_idx: torch.tensor(0.0, dtype=torch.float32) for env_idx in tasks}
 
             # increase the update counter
             self.update_counter += 1
@@ -327,6 +325,10 @@ class TD3_Agent:
                 total_actor_loss = total_actor_loss.cuda()
                 total_critic_loss1 = total_critic_loss1.cuda()
                 total_critic_loss2 = total_critic_loss2.cuda()
+
+                # adaptation loss per environment
+                for env_idx in tasks:
+                    adaptation_loss[env_idx] = adaptation_loss[env_idx].cuda()
 
             # calculate the loss for each environment
             for env_idx in tasks:
@@ -346,6 +348,9 @@ class TD3_Agent:
                 total_actor_loss += w * actor_loss
                 total_critic_loss1 += w * critic_loss1
                 total_critic_loss2 += w * critic_loss2
+
+                # adaptation loss
+                adaptation_loss[env_idx] = w * (actor_loss + critic_loss1 + critic_loss2)
 
             # # Average the losses across tasks
             # total_actor_loss /= len(tasks)
@@ -368,26 +373,34 @@ class TD3_Agent:
                     wandb.log({"rollout/critic_loss1": total_critic_loss1}, step=self.update_counter)
                     wandb.log({"rollout/critic_loss2": total_critic_loss2}, step=self.update_counter)
 
-            # update the critic_networks
-            critic_loss = total_critic_loss1 + total_critic_loss2
-            critic_loss.backward(retain_graph=True)
-            sync_grads(self.critic_network1)
-            sync_grads(self.critic_network2)
-            self.critic_optim1.step()
-            self.critic_optim2.step()
-
-            # update the adaptation networks
-            for env_idx in tasks:
-                sync_grads(self.adaptation_networks[env_idx])
-                self.adaptation_optimizers[env_idx].step()
-
-            # update the actor network
             if self.update_counter % self.args.policy_delay == 0:
-                total_actor_loss.backward()
+                # update the actor network
+                self.actor_optim.zero_grad()
+                total_actor_loss.backward(retain_graph=True)
                 sync_grads(self.actor_network)
                 self.actor_optim.step()
 
-                # soft update the target networks
+            # update the adaptation networks
+            for env_idx in tasks:
+                self.adaptation_optimizers[env_idx].zero_grad()
+                adaptation_loss[env_idx].backward(retain_graph=True)
+                sync_grads(self.adaptation_networks[env_idx])
+                self.adaptation_optimizers[env_idx].step()
+
+            # update the critic_network1
+            self.critic_optim1.zero_grad()
+            total_critic_loss1.backward(retain_graph=True)
+            sync_grads(self.critic_network1)
+            self.critic_optim1.step()
+
+            # update the critic_network2
+            self.critic_optim2.zero_grad()
+            total_critic_loss2.backward()
+            sync_grads(self.critic_network2)
+            self.critic_optim2.step()
+
+            # soft update the target networks
+            if self.update_counter % self.args.policy_delay == 0:
                 self._soft_update_target_network(self.actor_target_network, self.actor_network)
                 self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
                 self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
