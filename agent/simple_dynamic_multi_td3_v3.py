@@ -84,7 +84,7 @@ class TD3_Agent:
         self.adaptation_networks = [AdaptationNetwork(env_params, self.args.feature_size) for env_params in
                                     env_params_list]
         self.adaptation_target_networks = [AdaptationNetwork(env_params, self.args.feature_size) for env_params in
-                                            env_params_list]
+                                           env_params_list]
 
         # get the maximum action dimension
         self.max_action_dim = max([env_params['action'] for env_params in env_params_list])
@@ -175,7 +175,8 @@ class TD3_Agent:
             self.critic_target_network2.load_state_dict(self.critic_network2.state_dict())
 
         # load the adaptation target networks
-        for adaptation_network, adaptation_target_network in zip(self.adaptation_networks, self.adaptation_target_networks):
+        for adaptation_network, adaptation_target_network in zip(self.adaptation_networks,
+                                                                 self.adaptation_target_networks):
             adaptation_target_network.load_state_dict(adaptation_network.state_dict())
 
         # if you use gpu
@@ -402,11 +403,21 @@ class TD3_Agent:
                 self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
                 self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
 
+                # soft update the adaptation target networks
+                for adaptation_network, adaptation_target_network in zip(self.adaptation_networks,
+                                                                         self.adaptation_target_networks):
+                    self._soft_update_target_network(adaptation_target_network, adaptation_network)
+
         # soft update the target networks
         if self.global_step % self.args.policy_delay == 0:
             self._soft_update_target_network(self.actor_target_network, self.actor_network)
             self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
             self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
+
+            # soft update the adaptation target networks
+            for adaptation_network, adaptation_target_network in zip(self.adaptation_networks,
+                                                                     self.adaptation_target_networks):
+                self._soft_update_target_network(adaptation_target_network, adaptation_network)
 
         # check if the task is mastered and remove it from the list
         if self.rank == 0:
@@ -510,9 +521,9 @@ class TD3_Agent:
         with torch.no_grad():
             noise = (torch.randn_like(actions_tensor) * self.args.policy_noise).clamp(-self.args.noise_clip,
                                                                                       self.args.noise_clip)
-            z_next = self.adaptation_networks[env_idx](inputs_next_norm_tensor)
+            z_next = self.adaptation_target_networks[env_idx](inputs_next_norm_tensor)
             actions_next = (
-                        self.actor_target_network(z_next, self.env_params_list[env_idx]['action_max']) + noise).clamp(
+                    self.actor_target_network(z_next, self.env_params_list[env_idx]['action_max']) + noise).clamp(
                 -self.env_params_list[env_idx]['action_max'], self.env_params_list[env_idx]['action_max'])
             q_target1 = self.critic_target_network1(z_next, actions_next, self.env_params_list[env_idx]['action_max'])
             q_target2 = self.critic_target_network2(z_next, actions_next, self.env_params_list[env_idx]['action_max'])
@@ -1009,7 +1020,7 @@ class TD3_Agent:
 
                 # sync the done tasks list across all the processes
                 self.done_tasks = MPI.COMM_WORLD.bcast(self.done_tasks, root=0)
-                print("\033[92m" +  f"Task {env_name} is mastered!" + "\033[0m")
+                print("\033[92m" + f"Task {env_name} is mastered!" + "\033[0m")
 
                 # save the model
                 self.save_model(env_name)
