@@ -1,9 +1,9 @@
 import numpy as np
 import gymnasium as gym
 import os
-from configs.simple_dynamic_multi_arguments import get_args
+from configs.combined_dynamic_multi_arguments import get_args
 from mpi4py import MPI
-from agent.simple_dynamic_multi_td3 import TD3_Agent
+from agent.combined_dynamic_multi_td3 import TD3_Agent
 import random
 import torch
 

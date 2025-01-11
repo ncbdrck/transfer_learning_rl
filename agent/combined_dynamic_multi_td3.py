@@ -8,7 +8,6 @@ from utils.mpi_utils.normalizer import normalizer
 from utils.replay_buffer import replay_buffer
 from utils.her_modules.her import her_sampler
 from policy.models import actor, critic
-from policy.transformer_based import ActorTransformer, CriticTransformer
 
 # additional imports
 from torch.utils.tensorboard import SummaryWriter
@@ -40,10 +39,10 @@ class TD3_Agent:
         self.global_step = 0  # for outer loop
         self.update_counter = 0  # for inner loop
         self.task_success_rates = {env_name: [] for env_name in env_names}
-        self.prev_success_rate = {env_name: 0.0 for env_name in env_names}
+        # self.prev_success_rate = {env_name: 0.0 for env_name in env_names}
         self.critic_loss_history = {env_name: [] for env_name in env_names}
-        self.rolling_avg_critic_loss = {env_name: 0.0 for env_name in env_names}
-        self.easiness_scores = {env_name: [] for env_name in env_names}
+        # self.rolling_avg_critic_loss = {env_name: 0.0 for env_name in env_names}
+        self.easiness_scores_history = {env_name: [] for env_name in env_names}
 
         # store done tasks and their task index
         self.done_tasks = []
@@ -82,24 +81,13 @@ class TD3_Agent:
         self._seed = seed
 
         # create the network
-        if self.args.transformer_agent:
-            # create the transformer policy network
-            self.actor_network = ActorTransformer(self.env_params)
-            self.critic_network1 = CriticTransformer(self.env_params)
-            self.critic_network2 = CriticTransformer(self.env_params)
-            # build up the target network
-            self.actor_target_network = ActorTransformer(self.env_params)
-            self.critic_target_network1 = CriticTransformer(self.env_params)
-            self.critic_target_network2 = CriticTransformer(self.env_params)
-        else:
-            # create the policy network
-            self.actor_network = actor(self.env_params)
-            self.critic_network1 = critic(self.env_params)
-            self.critic_network2 = critic(self.env_params)
-            # build up the target network
-            self.actor_target_network = actor(self.env_params)
-            self.critic_target_network1 = critic(self.env_params)
-            self.critic_target_network2 = critic(self.env_params)
+        self.actor_network = actor(self.env_params)
+        self.critic_network1 = critic(self.env_params)
+        self.critic_network2 = critic(self.env_params)
+        # build up the target network
+        self.actor_target_network = actor(self.env_params)
+        self.critic_target_network1 = critic(self.env_params)
+        self.critic_target_network2 = critic(self.env_params)
 
         # Load the model if specified
         global_step = 0  # initialize the global step to 0
@@ -288,10 +276,7 @@ class TD3_Agent:
             self.inner_loop(env_idx)
 
         # Recompute weights each iteration or cycle
-        if self.args.use_softmax_weights:
-            task_weights = self.compute_task_weights_softmax(tasks)
-        else:
-            task_weights = self.compute_task_weights(tasks)
+        task_weights = self.compute_task_weights_softmax(tasks)
 
         # print the task weights
         if self.rank == 0:
@@ -480,6 +465,11 @@ class TD3_Agent:
         real_q_value2 = self.critic_network2(inputs_norm_tensor, actions_tensor)
         critic_loss1 = (target_q_value - real_q_value1).pow(2).mean()
         critic_loss2 = (target_q_value - real_q_value2).pow(2).mean()
+
+        # add the losses to the loss history - for calculating the easiness score
+        with torch.no_grad():
+            combined_loss = 0.5 * (critic_loss1 + critic_loss2)
+            self.critic_loss_history[self.env_names[env_idx]].append(combined_loss.item())
 
         # Compute critic loss
         # critic_loss = torch.nn.functional.mse_loss(real_q_value, target_q_value)
@@ -863,10 +853,26 @@ class TD3_Agent:
         return self.env_names[env_idx]
 
     def compute_task_easiness(self, env_names):
+        """
+        Considering
+            - success rate
+            - learning progress
+            - critic loss
+
+        to compute the easiness score for each task
+
+        :param env_names:
+        :return:
+        """
         easiness_scores = {}
-        # Consider the average success rate over the last success_rate_calculation_interval episodes
+
+        # Hyperparams for weighting each component
+        alpha = self.args.alpha_success_rate
+        beta = self.args.beta_critic_loss
+        gamma = self.args.gamma_learning_progress
 
         for env_name in env_names:
+            # success rate
             recent_successes = self.task_success_rates[env_name][-self.args.success_rate_calculation_interval:]
             if recent_successes:
                 avg_success = sum(recent_successes) / len(recent_successes)
@@ -878,20 +884,49 @@ class TD3_Agent:
             if self.rank == 0 and self.args.debug:
                 print(f"env: {env_name}, avg_success: {avg_success}")
 
-            # Easiness score = avg_success for now (simple criteria)
-            easiness_scores[env_name] = avg_success
+            # critic loss
+            recent_losses = self.critic_loss_history[env_name][-self.args.learning_progress_window:]
+            if recent_losses:
+                avg_loss = sum(recent_losses) / len(recent_losses)
+                if self.rank == 0:
+                    print(f"env: {env_name}, avg_loss: {avg_loss}")
+            else:
+                avg_loss = 0.0
 
-            # todo;  store the easiness score - we can use later for task weighting
-            self.easiness_scores[env_name].append(avg_success)
+            # learning progress
+            learning_progress = self.easiness_scores_history[env_name][-self.args.learning_progress_window:]
+            if learning_progress:
+                avg_learning_progress = sum(learning_progress) / len(learning_progress)
+                if self.rank == 0:
+                    print(f"env: {env_name}, avg_learning_progress: {avg_learning_progress}")
+            else:
+                avg_learning_progress = 0.0
+
+            # Combined score
+            if self.args.use_critic_loss and self.args.use_learning_progress:
+                combined_score = alpha * avg_success - beta * avg_loss + gamma * avg_learning_progress
+
+            elif self.args.use_critic_loss:
+                combined_score = alpha * avg_success - beta * avg_loss
+
+            else:
+                combined_score = avg_success
+
+            # Easiness score
+            easiness_scores[env_name] = combined_score
+
+            # store the easiness score
+            self.easiness_scores_history[env_name].append(combined_score)
 
             # log the easiness score
             if self.rank == 0:
-                self.writer.add_scalar(f"{env_name}/easiness_score", avg_success, self.global_step_env[self.get_env_idx(env_name)])
+                self.writer.add_scalar(f"{env_name}/easiness_score", combined_score, self.global_step_env[self.get_env_idx(env_name)])
                 if self.args.track:
-                    wandb.log({f"{env_name}/easiness_score": avg_success}, step=self.global_step_env[self.get_env_idx(env_name)])
+                    wandb.log({f"{env_name}/easiness_score": combined_score}, step=self.global_step_env[self.get_env_idx(env_name)])
         return easiness_scores
 
     # Simpler version of the compute_task_weights - Linearly scales the easiness scores to get the weights
+    # todo: not working well
     def compute_task_weights(self, tasks):
         env_names = [self.get_env_name(env_idx) for env_idx in tasks]
         easiness = self.compute_task_easiness(env_names)
