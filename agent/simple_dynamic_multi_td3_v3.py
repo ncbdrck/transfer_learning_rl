@@ -88,6 +88,8 @@ class TD3_Agent:
 
         # get the maximum action dimension
         self.max_action_dim = max([env_params['action'] for env_params in env_params_list])
+        if self.rank == 0 and self.args.debug:
+            print(f"Max action dimension: {self.max_action_dim} and feature_size: {self.args.feature_size}")
 
         # create the main networks
         self.actor_network = Actor(input_size=self.args.feature_size, act_dim=self.max_action_dim)
@@ -381,7 +383,18 @@ class TD3_Agent:
 
             # update the critic_networks
             critic_loss = total_critic_loss1 + total_critic_loss2
-            critic_loss.backward(retain_graph=True)
+
+            # make total actor loss as zero if the policy delay is not reached
+            if self.update_counter % self.args.policy_delay != 0:
+                total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
+                if self.args.cuda:
+                    total_actor_loss = total_actor_loss.cuda()
+
+            # sum all losses
+            total_loss = critic_loss + total_actor_loss
+            total_loss.backward()
+
+            # step all optimizers
             sync_grads(self.critic_network1)
             sync_grads(self.critic_network2)
             self.critic_optim1.step()
@@ -394,7 +407,7 @@ class TD3_Agent:
 
             # update the actor network
             if self.update_counter % self.args.policy_delay == 0:
-                total_actor_loss.backward()
+
                 sync_grads(self.actor_network)
                 self.actor_optim.step()
 
@@ -490,11 +503,20 @@ class TD3_Agent:
 
         # Pre-process the actions to have the same dimension as the maximum action dimension
         acts = transitions['actions']
+        if self.rank == 0 and self.args.debug:
+            print(f"Actions shape: {acts.shape}")
+            # print a random action
+            print(f"Random action: {acts[0]}")
+
         # check if the action dimension is less than the maximum action dimension
         if acts.shape[1] < self.max_action_dim:
             padded = np.zeros((acts.shape[0], self.max_action_dim), dtype=acts.dtype)
             padded[:, :acts.shape[1]] = acts
             transitions['actions'] = padded
+            if self.rank == 0 and self.args.debug:
+                print(f"Actions shape after padding: {transitions['actions'].shape}")
+                # print a random action
+                print(f"Random action: {transitions['actions'][0]}")
 
         # Normalize the inputs
         obs_norm = self.o_norms_list[env_idx].normalize(transitions['obs'])
@@ -530,7 +552,7 @@ class TD3_Agent:
             q_target = torch.min(q_target1, q_target2)
             target_q_value = r_tensor + self.args.gamma * q_target
             clip_return = 1 / (1 - self.args.gamma)
-            target_q_value = torch.clamp(target_q_value, -clip_return, 0)
+            # target_q_value = torch.clamp(target_q_value, -clip_return, 0)
 
         # Compute current Q-values and the critic loss
         z = self.adaptation_networks[env_idx](inputs_norm_tensor)
@@ -723,9 +745,14 @@ class TD3_Agent:
 
         # extract the action dimension of the environment (since we are using the same network for all the environments)
         action_dim = self.env_params_list[env_idx]['action']
+        if self.rank == 0 and self.args.debug:
+            print(f"action_dim of the {self.get_env_name(env_idx)}: {action_dim}")
+            print(f"current shape of the action: {action.shape}")
 
         # slice the action to the correct dimension
         action = action[:action_dim]
+        if self.rank == 0 and self.args.debug:
+            print(f"new shape of the action: {action.shape}")
 
         # add the gaussian
         action += self.args.noise_eps * self.env_params_list[env_idx]['action_max'] * np.random.randn(*action.shape)
