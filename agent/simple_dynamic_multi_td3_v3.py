@@ -383,22 +383,19 @@ class TD3_Agent:
 
             # update the critic_networks
             critic_loss = total_critic_loss1 + total_critic_loss2
-
-            # make total actor loss as zero if the policy delay is not reached
-            if self.update_counter % self.args.policy_delay != 0:
-                total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
-                if self.args.cuda:
-                    total_actor_loss = total_actor_loss.cuda()
-
-            # sum all losses
-            total_loss = critic_loss + total_actor_loss
-            total_loss.backward()
+            critic_loss.backward(retain_graph=True)
 
             # step all optimizers
             sync_grads(self.critic_network1)
             sync_grads(self.critic_network2)
             self.critic_optim1.step()
             self.critic_optim2.step()
+
+            # update the actor network
+            if self.update_counter % self.args.policy_delay == 0:
+                total_actor_loss.backward()
+                sync_grads(self.actor_network)
+                self.actor_optim.step()
 
             # update the adaptation networks
             for env_idx in tasks:
@@ -407,9 +404,6 @@ class TD3_Agent:
 
             # update the actor network
             if self.update_counter % self.args.policy_delay == 0:
-
-                sync_grads(self.actor_network)
-                self.actor_optim.step()
 
                 # soft update the target networks
                 self._soft_update_target_network(self.actor_target_network, self.actor_network)
@@ -504,9 +498,9 @@ class TD3_Agent:
         # Pre-process the actions to have the same dimension as the maximum action dimension
         acts = transitions['actions']
         if self.rank == 0 and self.args.debug:
-            print(f"Actions shape: {acts.shape}")
+            print(f"Actions shape before: {acts.shape}")
             # print a random action
-            print(f"Random action: {acts[0]}")
+            print(f"Random action before: {acts[0]}")
 
         # check if the action dimension is less than the maximum action dimension
         if acts.shape[1] < self.max_action_dim:
@@ -552,7 +546,7 @@ class TD3_Agent:
             q_target = torch.min(q_target1, q_target2)
             target_q_value = r_tensor + self.args.gamma * q_target
             clip_return = 1 / (1 - self.args.gamma)
-            # target_q_value = torch.clamp(target_q_value, -clip_return, 0)
+            target_q_value = torch.clamp(target_q_value, -clip_return, 0)
 
         # Compute current Q-values and the critic loss
         z = self.adaptation_networks[env_idx](inputs_norm_tensor)
