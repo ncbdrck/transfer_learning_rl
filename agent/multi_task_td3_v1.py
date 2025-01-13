@@ -69,10 +69,18 @@ class TD3_Agent:
 
         self.args = args
         self.envs = envs
-        self.env_params = env_params_list[0]  # assume all environments have the same action and observation spaces
         self.env_params_list = env_params_list
         self.env_names = env_names
         self._seed = seed
+
+        # find the env with the maximum observation and action space
+        self.max_action_dim = max([env_params['action'] for env_params in env_params_list])
+        self.max_obs_dim = max([env_params['obs'] for env_params in env_params_list])
+        self.env_params = {'obs': self.max_obs_dim,
+                           'goal': env_params_list[0]['goal'],
+                           'action': self.max_action_dim,
+                           'action_max': env_params_list[0]['action_max']
+                           }
 
         # create the network
         if self.args.transformer_agent:
@@ -400,11 +408,24 @@ class TD3_Agent:
         # Normalize the inputs
         obs_norm = self.o_norms_list[env_idx].normalize(transitions['obs'])
         g_norm = self.g_norms_list[env_idx].normalize(transitions['g'])
+        # Pad the observations to have the same dimension as the maximum observation dimension
+        if obs_norm.shape[1] < self.max_obs_dim:
+            obs_norm = np.pad(obs_norm, ((0, 0), (0, self.max_obs_dim - obs_norm.shape[1])), 'constant')
         inputs_norm = np.concatenate([obs_norm, g_norm], axis=1)
 
         obs_next_norm = self.o_norms_list[env_idx].normalize(transitions['obs_next'])
+        # Pad the observations to have the same dimension as the maximum observation dimension
+        if obs_next_norm.shape[1] < self.max_obs_dim:
+            obs_next_norm = np.pad(obs_next_norm, ((0, 0), (0, self.max_obs_dim - obs_next_norm.shape[1])), 'constant')
         g_next_norm = self.g_norms_list[env_idx].normalize(transitions['g_next'])
         inputs_next_norm = np.concatenate([obs_next_norm, g_next_norm], axis=1)
+
+        # Pre-process the actions to have the same dimension as the maximum action dimension
+        actions = transitions['actions']
+        if actions.shape[1] < self.max_action_dim:
+            # pad the actions
+            actions = np.pad(actions, ((0, 0), (0, self.max_action_dim - actions.shape[1])), 'constant')
+            transitions['actions'] = actions
 
         # Convert to tensors
         inputs_norm_tensor = torch.tensor(inputs_norm, dtype=torch.float32)
@@ -592,7 +613,21 @@ class TD3_Agent:
 
 
     def _select_actions(self, pi, env_idx):
+        """
+        Select the actions based on the policy network
+
+        NEW:
+            - Slice the action space to match the environment action space
+
+        :param pi:
+        :param env_idx:
+        :return:
+        """
         action = pi.cpu().numpy().squeeze()
+
+        # slice the action space
+        action = action[:self.env_params_list[env_idx]['action']]
+
         # add the gaussian
         action += self.args.noise_eps * self.env_params_list[env_idx]['action_max'] * np.random.randn(*action.shape)
         action = np.clip(action, -self.env_params_list[env_idx]['action_max'],
@@ -613,6 +648,9 @@ class TD3_Agent:
         """
         Preprocess the inputs for the networks
 
+        NEW:
+            - Pad the observation if the observation space is less than the maximum observation space
+
         :param obs: observation
         :param g: goal
         :param env_idx: Index of the environment
@@ -625,6 +663,11 @@ class TD3_Agent:
 
         obs_norm = o_norm.normalize(obs)
         g_norm = g_norm.normalize(g)
+
+        # pad the observation if the observation space is less than the maximum observation space
+        if obs_norm.shape[0] < self.max_obs_dim:
+            obs_norm = np.pad(obs_norm, (0, self.max_obs_dim - obs_norm.shape[0]), 'constant')
+
         inputs = np.concatenate([obs_norm, g_norm])
         inputs_tensor = torch.tensor(inputs, dtype=torch.float32).unsqueeze(0)
         if self.args.cuda:
