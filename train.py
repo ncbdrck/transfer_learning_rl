@@ -3,7 +3,7 @@ import gymnasium as gym
 import os
 from configs.arguments import get_args_vanilla
 from mpi4py import MPI
-from agent.multi_task_td3 import TD3_Agent
+from agent.multi_task_td3_v1 import TD3_Agent
 import random
 import torch
 
@@ -23,10 +23,10 @@ def get_env_params(env):
     return params
 
 def launch(args):
-    # env_names = ['FetchReach-v2', 'FetchPush-v2', 'FetchPick
-    # AndPlace-v2', 'FetchSlide-v2',
+    # env_names = ['FetchReach-v2', 'FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2',
     #              'PandaReach-v3', 'PandaPush-v3', 'PandaPickAndPlace-v3', 'PandaSlide-v3']  # all environments
     env_names = ['FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2']  # fetch environments
+    # env_names = ['FetchReach-v2', 'FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2']  # all fetch environments
     # env_names = ['FetchReach-v2']
     # env_names = ['PandaReach-v3', 'PandaPush-v3', 'PandaPickAndPlace-v3', 'PandaSlide-v3']  # panda environments
     # env_names = ['FetchReach-v2', 'FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2',
