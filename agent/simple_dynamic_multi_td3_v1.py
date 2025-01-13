@@ -16,6 +16,7 @@ import wandb
 import time
 import pickle
 import json
+import math
 
 """
 TD3 with HER (MPI-version) for multi-task learning - dynamic gradient updates
@@ -253,10 +254,30 @@ class TD3_Agent:
         if self.args.multiple_tasks:
             # sample the specific number of tasks if the number of tasks is less than the number of environments
             if self.args.multi_num_tasks < len(self.envs):
-                return np.random.randint(0, len(self.envs), size=self.args.multi_num_tasks).tolist()
+                tasks = np.random.randint(0, len(self.envs), size=self.args.multi_num_tasks).tolist()
+
+                # remove the tasks that are already done
+                tasks = [task for task in tasks if task not in self.done_tasks]
+
+                # exit the program if all the tasks are done
+                if len(tasks) == 0:
+                    print("\033[92m" + "All the tasks are mastered. Exiting the program!" + "\033[0m")
+                    exit()
+
+                return tasks
             else:
                 # if the number of tasks is greater than the number of environments, sample all the environments (default)
-                return list(range(len(self.envs)))
+                tasks = list(range(len(self.envs)))
+
+                # remove the tasks that are already done
+                tasks = [task for task in tasks if task not in self.done_tasks]
+
+                # exit the program if all the tasks are done
+                if len(tasks) == 0:
+                    print("\033[92m" + "All the tasks are mastered. Exiting the program!" + "\033[0m")
+                    exit()
+
+                return tasks
         else:
             # sample a single task
             return [np.random.randint(0, len(self.envs))]
@@ -273,6 +294,16 @@ class TD3_Agent:
         for env_idx in tasks:
             # sample the trajectories
             self.inner_loop(env_idx)
+
+        # Recompute weights each iteration or cycle
+        if self.args.use_softmax_weights:
+            task_weights = self.compute_task_weights_softmax(tasks)
+        else:
+            task_weights = self.compute_task_weights(tasks)
+
+        # print the task weights
+        if self.rank == 0:
+            print(f"Task weights: {task_weights}")
 
         for _ in range(self.args.n_batches):
             total_actor_loss = torch.tensor(0.0, dtype=torch.float32)
@@ -298,15 +329,18 @@ class TD3_Agent:
                     print(f"env:{env_idx} critic_loss1: {critic_loss1.requires_grad}")
                     print(f"env:{env_idx} critic_loss2: {critic_loss2.requires_grad}")
 
-                # Accumulate losses
-                total_actor_loss += actor_loss
-                total_critic_loss1 += critic_loss1
-                total_critic_loss2 += critic_loss2
+                env_name = self.env_names[env_idx]
+                w = task_weights.get(env_name, 1.0 / len(tasks))  # default weight is 1/N
 
-            # Average the losses across tasks
-            total_actor_loss /= len(tasks)
-            total_critic_loss1 /= len(tasks)
-            total_critic_loss2 /= len(tasks)
+                # Accumulate losses
+                total_actor_loss += w * actor_loss
+                total_critic_loss1 += w * critic_loss1
+                total_critic_loss2 += w * critic_loss2
+
+            # # Average the losses across tasks
+            # total_actor_loss /= len(tasks)
+            # total_critic_loss1 /= len(tasks)
+            # total_critic_loss2 /= len(tasks)
 
             if self.args.debug:
                 print(f"update counter: {self.update_counter}, total_critic_loss1: {total_critic_loss1}, "
@@ -354,6 +388,10 @@ class TD3_Agent:
             self._soft_update_target_network(self.actor_target_network, self.actor_network)
             self._soft_update_target_network(self.critic_target_network1, self.critic_network1)
             self._soft_update_target_network(self.critic_target_network2, self.critic_network2)
+
+        # check if the task is mastered and remove it from the list
+        if self.rank == 0:
+            self.update_task_selection(tasks)
 
     def evaluation_and_logging_cycle(self, cycle, epoch):
         """
@@ -561,7 +599,15 @@ class TD3_Agent:
 
         # store the episodes
         self.buffers[env_idx].store_episode([mb_obs, mb_ag, mb_g, mb_actions])
-        self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
+
+        # sync the task mastered list
+        self.done_tasks = MPI.COMM_WORLD.bcast(self.done_tasks, root=0)
+
+        # check if this task is not inside the done tasks
+        # if we don't do this, updating the normalizer will throw an error since it syncs across all the cpus
+        if env_idx not in self.done_tasks:
+            # update the normalizer
+            self._update_normalizer([mb_obs, mb_ag, mb_g, mb_actions], env_idx)
 
     def _log_episode(self, env_idx, episode_length, episode_reward, is_success):
         """
@@ -849,4 +895,83 @@ class TD3_Agent:
         :return:
         """
         return self.env_names[env_idx]
+
+    def compute_task_easiness(self, env_names):
+        easiness_scores = {}
+        # Consider the average success rate over the last success_rate_calculation_interval episodes
+
+        for env_name in env_names:
+            recent_successes = self.task_success_rates[env_name][-self.args.success_rate_calculation_interval:]
+            if recent_successes:
+                avg_success = sum(recent_successes) / len(recent_successes)
+                if self.rank == 0:
+                    print(f"env: {env_name}, recent_successes: {recent_successes}, avg_success: {avg_success}")
+            else:
+                avg_success = 0.0
+
+            if self.rank == 0 and self.args.debug:
+                print(f"env: {env_name}, avg_success: {avg_success}")
+
+            # Easiness score = avg_success for now (simple criteria)
+            easiness_scores[env_name] = avg_success
+
+            # todo;  store the easiness score - we can use later for task weighting
+            self.easiness_scores[env_name].append(avg_success)
+
+            # log the easiness score
+            if self.rank == 0:
+                self.writer.add_scalar(f"{env_name}/easiness_score", avg_success, self.global_step_env[self.get_env_idx(env_name)])
+                if self.args.track:
+                    wandb.log({f"{env_name}/easiness_score": avg_success}, step=self.global_step_env[self.get_env_idx(env_name)])
+        return easiness_scores
+
+    # Simpler version of the compute_task_weights - Linearly scales the easiness scores to get the weights
+    def compute_task_weights(self, tasks):
+        env_names = [self.get_env_name(env_idx) for env_idx in tasks]
+        easiness = self.compute_task_easiness(env_names)
+        total = sum(easiness.values()) + 1e-8  # Avoid division by zero
+        weights = {env_name: easiness[env_name] / total for env_name in env_names}
+
+        return weights
+
+    # Compute task weights using softmax - tau_softmax is the temperature parameter
+    def compute_task_weights_softmax(self, tasks):
+        env_names = [self.get_env_name(env_idx) for env_idx in tasks]
+        easiness = self.compute_task_easiness(env_names)
+        exp_values = {env_name: math.exp(easiness[env_name] / self.args.tau_softmax) for env_name in env_names}
+        total = sum(exp_values.values()) + 1e-8
+        weights = {env_name: exp_values[env_name] / total for env_name in env_names}
+        return weights
+
+    def is_task_mastered(self, env_name):
+        """
+        Check if the task is mastered
+        """
+        recent_successes = self.task_success_rates[env_name][-self.success_rate_calculation_interval * 2:]
+        if not recent_successes:
+            return False
+        avg_success = sum(recent_successes) / len(recent_successes)
+        return avg_success > self.args.task_mastered_threshold
+
+    def update_task_selection(self, tasks):
+        # get the env names
+        env_names = [self.get_env_name(env_idx) for env_idx in tasks]
+
+        # Check mastery criteria
+        for env_name in env_names:
+            env_idx = self.get_env_idx(env_name)
+
+            # check if the task is already added to the done tasks list
+            is_task_done = env_idx in self.done_tasks
+
+            if not is_task_done and self.is_task_mastered(env_name):
+                # add the task to the done tasks list
+                self.done_tasks.append(env_idx)
+
+                # sync the done tasks list across all the processes
+                self.done_tasks = MPI.COMM_WORLD.bcast(self.done_tasks, root=0)
+
+                if self.rank == 0:
+                    print(f"Task {env_name} is mastered!")
+                self.save_model(env_name)
 
