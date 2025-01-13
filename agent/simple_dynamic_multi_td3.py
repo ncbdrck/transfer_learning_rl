@@ -18,7 +18,7 @@ import pickle
 import json
 import math
 """
-TD3 with HER (MPI-version) for multi-task learning
+TD3 with HER (MPI-version) for multi-task learning - dynamic gradient updates
 - v0: Initial version
 - Updated the loss calculation to include the task weights
 - Learn the easy tasks first then move to the harder tasks (curriculum learning)
