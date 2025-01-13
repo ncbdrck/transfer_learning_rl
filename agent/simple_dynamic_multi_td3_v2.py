@@ -21,7 +21,7 @@ from policy.adaptation_based import Actor, Critic, AdaptationNetwork
 
 """
 TD3 with HER (MPI-version) for multi-task learning
-- v1
+- v2
 - For envs with different action and observation spaces
 - added Adaptation network for task-specific processing for each environment
 - selects the maximum action space of all the environments for the actor and critic networks
