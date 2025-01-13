@@ -623,6 +623,9 @@ class TD3_Agent:
         # get env name
         env_name = self.env_names[env_idx]
 
+        # append the task success rate
+        self.task_success_rates[env_name].append(is_success)
+
         # append the episode length and calculate the mean
         self.ep_len_history_env[env_idx].append(episode_length)
         if len(self.ep_len_history_env[env_idx]) >= self.log_interval:
@@ -764,6 +767,8 @@ class TD3_Agent:
         Evaluate the agent
         :return: mean_success_rate, mean_reward, mean_ep_len, mean_success_rate_per_env, mean_reward_per_env,
         mean_ep_len_per_env
+
+        **** Notice that we are evaluating all the environments even if we are not training on them
         """
         total_success_rate = []
         total_ep_len = []
@@ -822,6 +827,8 @@ class TD3_Agent:
 
         # for all the environments
         local_success_rate = np.mean(total_success_rate)
+        if self.rank == 0:
+            print(f"local_success_rate: {local_success_rate}")
         global_success_rate = MPI.COMM_WORLD.allreduce(local_success_rate, op=MPI.SUM)
         local_ep_len = np.mean(total_ep_len)
         global_ep_len = MPI.COMM_WORLD.allreduce(local_ep_len, op=MPI.SUM)
@@ -838,6 +845,8 @@ class TD3_Agent:
         mean_reward_per_env = {env_name: np.float32(0) for env_name in self.env_names}
         for env_name in self.env_names:
             local_success_rate_env = total_success_rate_per_env[env_name]
+            if self.rank == 0:
+                print(f"local_success_rate_env {env_name}: {local_success_rate_env}")
             global_success_rate_env = MPI.COMM_WORLD.allreduce(local_success_rate_env, op=MPI.SUM)
             local_reward_env = total_reward_per_env[env_name]
             global_reward_env = MPI.COMM_WORLD.allreduce(local_reward_env, op=MPI.SUM)
