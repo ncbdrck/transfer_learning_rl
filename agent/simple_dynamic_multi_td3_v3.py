@@ -383,7 +383,10 @@ class TD3_Agent:
 
             # update the critic_networks
             critic_loss = total_critic_loss1 + total_critic_loss2
-            critic_loss.backward(retain_graph=True)
+            if self.update_counter % self.args.policy_delay == 0:
+                critic_loss.backward(retain_graph=True)
+            else:
+                critic_loss.backward()
 
             # step all optimizers
             sync_grads(self.critic_network1)
@@ -495,22 +498,22 @@ class TD3_Agent:
         transitions['obs'], transitions['g'] = self._preproc_og(o, g)
         transitions['obs_next'], transitions['g_next'] = self._preproc_og(o_next, g)
 
-        # Pre-process the actions to have the same dimension as the maximum action dimension
-        acts = transitions['actions']
-        if self.rank == 0 and self.args.debug:
-            print(f"Actions shape before: {acts.shape}")
-            # print a random action
-            print(f"Random action before: {acts[0]}")
-
-        # check if the action dimension is less than the maximum action dimension
-        if acts.shape[1] < self.max_action_dim:
-            padded = np.zeros((acts.shape[0], self.max_action_dim), dtype=acts.dtype)
-            padded[:, :acts.shape[1]] = acts
-            transitions['actions'] = padded
-            if self.rank == 0 and self.args.debug:
-                print(f"Actions shape after padding: {transitions['actions'].shape}")
-                # print a random action
-                print(f"Random action: {transitions['actions'][0]}")
+        # # Pre-process the actions to have the same dimension as the maximum action dimension
+        # acts = transitions['actions']
+        # if self.rank == 0 and self.args.debug:
+        #     print(f"Actions shape before: {acts.shape}")
+        #     # print a random action
+        #     print(f"Random action before: {acts[0]}")
+        #
+        # # check if the action dimension is less than the maximum action dimension
+        # if acts.shape[1] < self.max_action_dim:
+        #     padded = np.zeros((acts.shape[0], self.max_action_dim), dtype=acts.dtype)
+        #     padded[:, :acts.shape[1]] = acts
+        #     transitions['actions'] = padded
+        #     if self.rank == 0 and self.args.debug:
+        #         print(f"Actions shape after padding: {transitions['actions'].shape}")
+        #         # print a random action
+        #         print(f"Random action: {transitions['actions'][0]}")
 
         # Normalize the inputs
         obs_norm = self.o_norms_list[env_idx].normalize(transitions['obs'])
@@ -520,6 +523,13 @@ class TD3_Agent:
         obs_next_norm = self.o_norms_list[env_idx].normalize(transitions['obs_next'])
         g_next_norm = self.g_norms_list[env_idx].normalize(transitions['g_next'])
         inputs_next_norm = np.concatenate([obs_next_norm, g_next_norm], axis=1)
+
+        # Pre-process the actions to have the same dimension as the maximum action dimension
+        actions = transitions['actions']
+        if actions.shape[1] < self.max_action_dim:
+            # pad the actions
+            actions = np.pad(actions, ((0, 0), (0, self.max_action_dim - actions.shape[1])), 'constant')
+            transitions['actions'] = actions
 
         # Convert to tensors
         inputs_norm_tensor = torch.tensor(inputs_norm, dtype=torch.float32)
@@ -744,7 +754,7 @@ class TD3_Agent:
             print(f"current shape of the action: {action.shape}")
 
         # slice the action to the correct dimension
-        action = action[:action_dim]
+        action = action[:self.env_params_list[env_idx]['action']]
         if self.rank == 0 and self.args.debug:
             print(f"new shape of the action: {action.shape}")
 
