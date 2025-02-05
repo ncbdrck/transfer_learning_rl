@@ -320,6 +320,13 @@ class TD3_Agent:
         if self.rank == 0:
             print(f"Task weights: {task_weights}")
 
+            # add them to the tensorboard and wandb
+
+            for env_name, weight in task_weights.items():
+                self.writer.add_scalar(f"task_weights/{env_name}", weight, self.global_step)
+                if self.args.track:
+                    wandb.log({f"task_weights/{env_name}": weight}, step=self.global_step)
+
         for _ in range(self.args.n_batches):
 
             # Zero grads for actor, critics, and adaptation networks
