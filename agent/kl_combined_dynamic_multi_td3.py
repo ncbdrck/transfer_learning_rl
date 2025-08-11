@@ -18,9 +18,8 @@ import json
 import math
 """
 TD3 with HER (MPI-version) for multi-task learning
-- Based on the simple dynamics multi-task td3 implementation
-- Apart from the simple "average success rate" for task weighting, we also consider learning progress as well as average
-critic loss for task weighting
+- Based on the combined dynamics multi-task td3 implementation - v0
+- Added KL-based dynamic task prioritization
 """
 
 
@@ -178,6 +177,10 @@ class TD3_Agent:
                              in env_params_list]
         self.g_norms_list = [normalizer(size=env_params['goal'], default_clip_range=self.args.clip_range) for env_params
                              in env_params_list]
+
+        # todo: EMA for the normalizers - jay
+        self.critic_loss_ema_mean = {env_name: 0.0 for env_name in env_names}
+        self.critic_loss_ema_std = {env_name: 1.0 for env_name in env_names}
 
         # Create directory to store the model
         if self.rank == 0:
@@ -476,6 +479,17 @@ class TD3_Agent:
         with torch.no_grad():
             combined_loss = 0.5 * (critic_loss1 + critic_loss2)
             self.critic_loss_history[self.env_names[env_idx]].append(combined_loss.item())
+
+            # todo: Update the EMA for the critic loss -jay
+            env_name = self.env_names[env_idx]
+            new_val = combined_loss.item()
+            m = self.critic_loss_ema_mean[env_name]
+            s = self.critic_loss_ema_std[env_name]
+            m_new = self._ema_update(m, new_val, tau=0.02)
+            var_old = s ** 2
+            var_new = self._ema_update(var_old, (new_val - m_new) ** 2, tau=0.02)
+            self.critic_loss_ema_mean[env_name] = m_new
+            self.critic_loss_ema_std[env_name] = max(1e-6, float(np.sqrt(var_new)))
 
         # Compute critic loss
         # critic_loss = torch.nn.functional.mse_loss(real_q_value, target_q_value)
@@ -867,15 +881,22 @@ class TD3_Agent:
 
         to compute the easiness score for each task
 
+        # todo: updated for stability-aware version
+
         :param env_names:
         :return:
         """
-        easiness_scores = {}
-
         # Hyperparams for weighting each component
+        W_REC  = self.args.curriculum_window
+        W_PAST = self.args.curriculum_past_window
+        BINS   = self.args.curriculum_bins
+        eps    = self.args.curriculum_eps
+
         alpha = self.args.alpha_success_rate
-        beta = self.args.beta_critic_loss
-        gamma = self.args.gamma_learning_progress
+        beta  = self.args.beta_critic_loss
+        gamma = self.args.gamma_learning_progress  # now = stability weight
+
+        easiness_scores = {}
 
         for env_name in env_names:
             # success rate
@@ -981,3 +1002,21 @@ class TD3_Agent:
                 if self.rank == 0:
                     print(f"Task {env_name} is mastered!")
                 self.save_model(env_name)
+
+    # todo: all the new methods below are for curriculum learning - Jay
+    def _safe_hist(self, x, bins, rng):
+        h, _ = np.histogram(x, bins=bins, range=rng, density=False)
+        h = h.astype(np.float64) + self.args.curriculum_eps
+        return h / h.sum()
+
+    def _kl(self, p, q):
+        e = self.args.curriculum_eps
+        return np.sum(p * (np.log(p + e) - np.log(q + e)))
+
+    def _js(self, p, q):
+        m = 0.5 * (p + q)
+        return 0.5 * self._kl(p, m) + 0.5 * self._kl(q, m)
+
+    def _ema_update(self, old, new, tau=0.02):
+        return (1 - tau) * old + tau * new
+

@@ -4,7 +4,7 @@ import argparse
 Here are the param for the training
 - Multi-Task leaning with TD3
 - We are learning task dynamically
-- 
+- KL-based
 """
 
 
@@ -96,6 +96,13 @@ def get_args():
     parser.add_argument('--use_learning_progress', type=bool, default=True, help='if toggled, this experiment will use the learning progress')
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
+
+    # kl-based args
+    parser.add_argument('--curriculum_window', type=int, default=100)  # recent window (episodes)
+    parser.add_argument('--curriculum_past_window', type=int, default=100)  # past window
+    parser.add_argument('--curriculum_bins', type=int, default=10)
+    parser.add_argument('--curriculum_eps', type=float, default=1e-8)
+    parser.add_argument('--ideal_ep_len_pct', type=float, default=0.2)  # "short" ep fraction of horizon
 
     args = parser.parse_args()
 
