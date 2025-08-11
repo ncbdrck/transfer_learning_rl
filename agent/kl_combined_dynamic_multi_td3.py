@@ -886,6 +886,7 @@ class TD3_Agent:
         :param env_names:
         :return:
         """
+        # todo: new arguments for the hyperparams -jay
         # Hyperparams for weighting each component
         W_REC  = self.args.curriculum_window
         W_PAST = self.args.curriculum_past_window
@@ -899,26 +900,46 @@ class TD3_Agent:
         easiness_scores = {}
 
         for env_name in env_names:
-            # success rate
-            recent_successes = self.task_success_rates[env_name][-self.args.success_rate_calculation_interval:]
-            if recent_successes:
-                avg_success = sum(recent_successes) / len(recent_successes)
-                if self.rank == 0:
-                    print(f"env: {env_name}, recent_successes: {recent_successes}, avg_success: {avg_success}")
-            else:
-                avg_success = 0.0
 
-            if self.rank == 0 and self.args.debug:
-                print(f"env: {env_name}, avg_success: {avg_success}")
+            # todo: here we are increasing the arguments for the easiness score calculation
+            idx = self.get_env_idx(env_name)
+            succ = np.asarray(self.task_success_rates[env_name], dtype=np.float32)
+            lens = np.asarray(self.ep_len_history_env[idx], dtype=np.float32)
+            rews = np.asarray(self.reward_history_env[idx], dtype=np.float32)
 
-            # critic loss
-            recent_losses = self.critic_loss_history[env_name][-self.args.learning_progress_window:]
-            if recent_losses:
-                avg_loss = sum(recent_losses) / len(recent_losses)
-                if self.rank == 0:
-                    print(f"env: {env_name}, avg_loss: {avg_loss}")
-            else:
-                avg_loss = 0.0
+            # guard for warm-up
+            if len(succ) < max(10, W_REC // 2):
+                easiness_scores[env_name] = 0.0
+                continue
+
+            # windows
+            recent_succ = succ[-W_REC:] if len(succ) >= W_REC else succ
+            past_succ = succ[-(W_REC + W_PAST):-W_REC] if len(succ) >= (W_REC + W_PAST) else succ[
+                :max(1, len(succ) // 2)]
+            recent_len = lens[-W_REC:] if len(lens) >= W_REC else lens
+            past_len = lens[-(W_REC + W_PAST):-W_REC] if len(lens) >= (W_REC + W_PAST) else lens[
+                :max(1, len(lens) // 2)]
+            recent_rew = rews[-W_REC:] if len(rews) >= W_REC else rews
+            past_rew = rews[-(W_REC + W_PAST):-W_REC] if len(rews) >= (W_REC + W_PAST) else rews[
+                :max(1, len(rews) // 2)]
+
+            # 1) success rate
+            avg_success = float(np.mean(recent_succ)) if recent_succ.size else 0.0
+            if self.rank == 0:
+                print(f"env: {env_name}, recent_successes: {recent_succ}, avg_success: {avg_success}")
+
+            # 2) critic loss (per-task normalized, flipped so lower loss = higher score)
+            mean = self.critic_loss_ema_mean[env_name]
+            std = self.critic_loss_ema_std[env_name]
+            recent_losses = self.critic_loss_history[env_name][-W_REC:]
+            avg_loss = float(np.mean(recent_losses)) if len(recent_losses) else mean
+            z_loss = (avg_loss - mean) / (std + 1e-6)
+            loss_term01 = 0.5 * (1.0 - np.tanh(z_loss)) + 0.0  # map lower loss→~1, higher→~0
+            if self.rank == 0:
+                print(f"env: {env_name}, avg_loss: {avg_loss}",
+                      f"mean: {mean}, std: {std}, z_loss: {z_loss}, loss_term01: {loss_term01}")
+
+            # 3) stability via JS(recent || past) over success/len/reward
 
             # learning progress
             learning_progress = self.easiness_scores_history[env_name][-self.args.learning_progress_window:]
