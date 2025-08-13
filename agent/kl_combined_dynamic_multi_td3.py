@@ -19,7 +19,8 @@ import math
 """
 TD3 with HER (MPI-version) for multi-task learning
 - Based on the combined dynamics multi-task td3 implementation - v0
-- Added KL-based dynamic task prioritization
+- Added JS-based (distributional) task stability for dynamic prioritization
+- Do not work with environments that have different action and observation spaces
 """
 
 
@@ -895,7 +896,7 @@ class TD3_Agent:
 
         alpha = self.args.alpha_success_rate
         beta  = self.args.beta_critic_loss
-        gamma = self.args.gamma_learning_progress  # now = stability weight
+        gamma = self.args.gamma_stability   # now = stability weight
 
         easiness_scores = {}
 
@@ -909,7 +910,7 @@ class TD3_Agent:
 
             # guard for warm-up
             if len(succ) < max(10, W_REC // 2):
-                easiness_scores[env_name] = 0.0
+                easiness_scores[env_name] = 1e-6
                 continue
 
             # windows
@@ -940,37 +941,53 @@ class TD3_Agent:
                       f"mean: {mean}, std: {std}, z_loss: {z_loss}, loss_term01: {loss_term01}")
 
             # 3) stability via JS(recent || past) over success/len/reward
+            p_succ = self._safe_hist(recent_succ, bins=2, rng=(0, 1))
+            q_succ = self._safe_hist(past_succ, bins=2, rng=(0, 1))
 
-            # learning progress
-            learning_progress = self.easiness_scores_history[env_name][-self.args.learning_progress_window:]
-            if learning_progress:
-                avg_learning_progress = sum(learning_progress) / len(learning_progress)
-                if self.rank == 0:
-                    print(f"env: {env_name}, avg_learning_progress: {avg_learning_progress}")
+            max_t = float(self.env_params_list[idx]['max_timesteps'])
+            p_len = self._safe_hist(np.clip(recent_len / (max_t + eps), 0, 1), BINS, (0, 1))
+            q_len = self._safe_hist(np.clip(past_len / (max_t + eps), 0, 1), BINS, (0, 1))
+
+            # robust reward range
+            if len(recent_rew) and len(past_rew):
+                rmin = float(np.min(np.concatenate([recent_rew, past_rew])))
+                rmax = float(np.max(np.concatenate([recent_rew, past_rew])))
+            elif len(recent_rew):
+                rmin, rmax = float(np.min(recent_rew)), float(np.max(recent_rew))
             else:
-                avg_learning_progress = 0.0
+                rmin, rmax = 0.0, 1.0
+            if not np.isfinite(rmin) or not np.isfinite(rmax) or rmax <= rmin:
+                rmin, rmax = 0.0, 1.0
+            p_rew = self._safe_hist(recent_rew, BINS, (rmin - 1e-6, rmax + 1e-6))
+            q_rew = self._safe_hist(past_rew, BINS, (rmin - 1e-6, rmax + 1e-6))
 
-            # Combined score
-            if self.args.use_critic_loss and self.args.use_learning_progress:
-                combined_score = alpha * avg_success - beta * avg_loss + gamma * avg_learning_progress
+            d_js = (self._js(p_succ, q_succ) + self._js(p_len, q_len) + self._js(p_rew, q_rew)) / 3.0
+            # todo: not required, but will bounded 0..1 for logging
+            # js01 = d_js / (np.log(2) + 1e-8)
+            # stability = 1.0 - js01  # equivalent monotonic transform
+            stability = 1.0 / (1.0 + d_js)  # higher = more stable
 
-            elif self.args.use_critic_loss:
-                combined_score = alpha * avg_success - beta * avg_loss
-
-            else:
-                combined_score = avg_success
+            # combine the scores
+            score = alpha * avg_success + beta * loss_term01 + gamma * stability
 
             # Easiness score
-            easiness_scores[env_name] = combined_score
+            easiness_scores[env_name] = float(score)
 
             # store the easiness score
-            self.easiness_scores_history[env_name].append(combined_score)
+            self.easiness_scores_history[env_name].append(float(score))
 
             # log the easiness score
             if self.rank == 0:
-                self.writer.add_scalar(f"{env_name}/easiness_score", combined_score, self.global_step_env[self.get_env_idx(env_name)])
+                self.writer.add_scalar(f"{env_name}/easiness_score", score, self.global_step_env[idx])
+                self.writer.add_scalar(f"{env_name}/avg_success", avg_success, self.global_step_env[idx])
+                self.writer.add_scalar(f"{env_name}/loss_term01", loss_term01, self.global_step_env[idx])
+                self.writer.add_scalar(f"{env_name}/stability", stability, self.global_step_env[idx])
                 if self.args.track:
-                    wandb.log({f"{env_name}/easiness_score": combined_score}, step=self.global_step_env[self.get_env_idx(env_name)])
+                    wandb.log({f"{env_name}/easiness_score": score}, step=self.global_step_env[idx])
+                    wandb.log({f"{env_name}/avg_success": avg_success}, step=self.global_step_env[idx])
+                    wandb.log({f"{env_name}/loss_term01": loss_term01}, step=self.global_step_env[idx])
+                    wandb.log({f"{env_name}/stability": stability}, step=self.global_step_env[idx])
+
         return easiness_scores
 
     # Simpler version of the compute_task_weights - Linearly scales the easiness scores to get the weights

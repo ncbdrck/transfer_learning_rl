@@ -25,7 +25,7 @@ def get_env_params(env):
 def launch(args):
     # env_names = ['FetchReach-v2', 'FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2',
     #              'PandaReach-v3', 'PandaPush-v3', 'PandaPickAndPlace-v3', 'PandaSlide-v3']  # all environments
-    env_names = ['FetchReach-v2', 'FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2']  # all fetch environments
+    env_names = ['FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2']  # all fetch environments
     # env_names = ['FetchPush-v2', 'FetchPickAndPlace-v2', 'FetchSlide-v2']  # fetch environments
     # env_names = ['FetchReach-v2']
     # env_names = ['PandaReach-v3', 'PandaPush-v3', 'PandaPickAndPlace-v3', 'PandaSlide-v3']  # panda environments

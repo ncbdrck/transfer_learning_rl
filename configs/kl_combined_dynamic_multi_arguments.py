@@ -87,13 +87,13 @@ def get_args():
                         help='the threshold to consider the task is mastered')
 
     # for dynamic task learning
-    parser.add_argument('--alpha_success_rate', type=float, default=1.0, help='the hyperparameter for the success rate')
-    parser.add_argument('--beta_critic_loss', type=float, default=0.01, help='the hyperparameter for the critic loss')
-    parser.add_argument('--gamma_learning_progress', type=float, default=0.5, help='the hyperparameter for the learning progress')
-    parser.add_argument('--critic_loss_window', type=int, default=100, help='the window size for the critic loss')
-    parser.add_argument('--learning_progress_window', type=int, default=100, help='the window size for the learning progress')
-    parser.add_argument('--use_critic_loss', type=bool, default=True, help='if toggled, this experiment will use the critic loss')
-    parser.add_argument('--use_learning_progress', type=bool, default=True, help='if toggled, this experiment will use the learning progress')
+    parser.add_argument('--alpha_success_rate', type=float, default=0.6, help='the hyperparameter for the success rate')
+    parser.add_argument('--beta_critic_loss', type=float, default=0.2, help='the hyperparameter for the critic loss')
+    parser.add_argument('--gamma_stability', type=float, default=0.2, help='the hyperparameter for the learning progress')
+    # parser.add_argument('--critic_loss_window', type=int, default=100, help='the window size for the critic loss')
+    # parser.add_argument('--learning_progress_window', type=int, default=100, help='the window size for the learning progress')
+    # parser.add_argument('--use_critic_loss', type=bool, default=True, help='if toggled, this experiment will use the critic loss')
+    # parser.add_argument('--use_learning_progress', type=bool, default=True, help='if toggled, this experiment will use the learning progress')
 
     parser.add_argument('--debug', type=bool, default=False, help='if toggled, this experiment will run in debug mode')
 
