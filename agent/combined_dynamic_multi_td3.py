@@ -19,6 +19,7 @@ import math
 """
 TD3 with HER (MPI-version) for multi-task learning
 - Based on the simple dynamics multi-task td3 implementation
+- Do not work with Envs that have different action and observation spaces
 - Apart from the simple "average success rate" for task weighting, we also consider learning progress as well as average
 critic loss for task weighting
 """
